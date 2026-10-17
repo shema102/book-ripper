@@ -17,7 +17,7 @@ from opticalbook.android import Phone, focused, parse_counter
 from opticalbook.capture import capture, validate_manifest
 from opticalbook.common import defaults, digest, read_json, write_json
 from opticalbook.indicator import parse_indicator, prepare, read_indicator, whitelist
-from opticalbook.generation import build_epub, import_images, page_record, recognize, save_review
+from opticalbook.generation import build_epub, import_images, ocr_test, page_record, recognize, save_review
 from opticalbook.__main__ import main
 from opticalbook.imaging import REGIONS, Camera, controls, exposure_raw, exposure_seconds, from_screen, gesture_from, parse_shutter, peaking, rectify, rotate_point, shutter_text, to_screen
 from opticalbook.layout import paragraph_starts
@@ -96,6 +96,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.scan(phone=phone),2)
         self.assertEqual(phone.turns,1)
         self.assertEqual([x['page'] for x in validate_manifest(self.folder)['pages']],[1,2])
+
+    def test_screen_brightness_is_held_during_capture_and_restored_after_errors(self):
+        class DimmablePhone(FakePhone):
+            def screen_brightness(self,level,mode=0):
+                self.__dict__.setdefault('levels',[]).append((int(level),mode));return (150,1)
+        phone=DimmablePhone()
+        self.config['screen_brightness']=10
+        self.assertEqual(self.scan(phone=phone),2)
+        self.assertEqual(phone.levels,[(10,0),(150,1)])  # previous level and automatic mode come back
+        phone=DimmablePhone(step=2)
+        with self.assertRaisesRegex(RuntimeError,'Expected'):
+            capture(Path(self.temp.name)/'other',self.config,FakeCamera(phone),1,2,log=lambda _:None,phone=phone)
+        self.assertEqual(phone.levels,[(10,0),(150,1)])
+        self.config['screen_brightness']=300
+        with self.assertRaisesRegex(ValueError,'1–255'):self.scan(phone=DimmablePhone())
 
     def test_skipped_page_stops_before_wrong_save(self):
         with self.assertRaisesRegex(RuntimeError,'Expected 2/2'):
@@ -353,6 +368,11 @@ class WorkflowTests(unittest.TestCase):
         phone.adb=adb
         phone.turn()
         self.assertEqual(calls[-1],('shell','input','tap','1079','1170'))
+        phone.turn(back=True)  # previous page: the tap mirrored to the other side
+        self.assertEqual(calls[-1],('shell','input','tap','0','1170'))
+        phone.config['gesture']={'kind':'swipe','start':[.8,.5],'end':[.2,.5],'duration_ms':300}
+        phone.turn(back=True)  # previous page: the swipe reversed
+        self.assertEqual(calls[-1],('shell','input','swipe','216','1170','863','1170','300'))
 
     def test_exposure_is_shown_as_shutter_time_in_backend_units(self):
         self.assertEqual([parse_shutter(text) for text in ('1/60','60','0.5','2s','1/8s')],[1/60,1/60,.5,2.0,1/8])
@@ -416,6 +436,17 @@ class WorkflowTests(unittest.TestCase):
         starts,_=paragraph_starts([line(0),line(30,group=2),line(60,left=55),line(90)],680)
         self.assertEqual(starts,['page-start',None,'indentation',None])
 
+    def test_layout_keeps_lines_beside_a_drop_cap_together(self):
+        def line(y,left=20,group=1,text='A continuous ordinary text line',right=650):
+            return dict(text=text,left=left,right=right,top=y,bottom=y+24,group=[group,1])
+        # Heading, then two lines indented by an unrecognized drop cap, each in its own OCR block.
+        page=[line(0,left=280,text='THE FALLEN',right=400),line(80,left=75,group=2),line(110,left=76,group=3),
+              line(140,left=55,group=4),line(170),line(200),line(230),
+              line(260,left=55,group=5),line(290,left=55,group=6),line(320)]
+        starts,_=paragraph_starts(page,680)
+        # Outside a section opening, an aligned indented line in a new OCR block still starts a paragraph.
+        self.assertEqual(starts,['page-start','vertical-space',None,'indentation',None,None,None,'indentation','indentation',None])
+
     def test_image_import_uses_natural_order_without_adb_or_camera(self):
         source=self.folder/'input';source.mkdir()
         for name in ('page10.jpg','page2.jpg','page1.jpg'):page_image(1).save(source/name)
@@ -476,6 +507,35 @@ class WorkflowTests(unittest.TestCase):
             self.book['psm']=6
             recognize(self.folder,self.book,log=lambda _:None)
             self.assertEqual(runner.call_count,2)
+
+    def test_latin_lookalikes_are_reread_without_eng_and_free_hyphens_become_dashes(self):
+        def tsv(*words):
+            return ('level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'+''.join(
+                f'5\t1\t1\t1\t1\t{n}\t{20+100*n}\t20\t80\t25\t90\t{text}\n' for n,text in enumerate(words,1))).encode()
+        first=tsv('Він','купив','iPhone','He','-','Apeca','сказав','нам')
+        with patch('opticalbook.generation.tesseract',return_value=('tesseract','')),\
+             patch('opticalbook.generation.run',side_effect=[first,tsv('Він','купив','іРһопе','не','-','Ареса','сказав','нам')]) as runner:
+            _,lines=ocr_test(page_image(1),dict(self.book,ocr_language='ukr+eng',scale=1))
+        self.assertEqual(lines[0]['text'],'Він купив iPhone не — Ареса сказав нам')  # iPhone has letters without Cyrillic twins
+        self.assertEqual([word.get('ocr_text') for word in lines[0]['words'] if 'ocr_text' in word],['He','Apeca'])
+        self.assertEqual(runner.call_args_list[1][0][0][3:5],['-l','ukr'])
+        # A mostly Latin page is not re-read: there 'He' is English.
+        with patch('opticalbook.generation.tesseract',return_value=('tesseract','')),\
+             patch('opticalbook.generation.run',return_value=tsv('He','said','that','nothing','was','wrong')) as runner:
+            _,lines=ocr_test(page_image(1),dict(self.book,ocr_language='ukr+eng',scale=1))
+        self.assertEqual((runner.call_count,lines[0]['text']),(1,'He said that nothing was wrong'))
+
+    def test_ocr_test_uses_book_pipeline_and_writes_nothing(self):
+        raw='level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'+''.join(
+            f'5\t1\t1\t1\t{n}\t1\t{left}\t{10+45*n}\t{600-left}\t25\t{conf}\t{text}\n' for n,(left,conf,text) in
+            enumerate([(60,95,'First line of a paragraph that is'),(15,40,'continued on the next line.'),(60,95,'Next one.')],1))
+        before=sorted(self.folder.rglob('*'))
+        with patch('opticalbook.generation.tesseract',return_value=('tesseract','')),patch('opticalbook.generation.run',return_value=raw.encode()) as runner:
+            values,lines=ocr_test(page_image(1),dict(self.book,scale=1))
+        self.assertEqual([value['text'] for value in values],['First line of a paragraph that is continued on the next line.','Next one.'])
+        self.assertEqual(lines[1]['words'][0]['confidence'],40)
+        self.assertEqual(runner.call_args[0][0][:3],['tesseract','stdin','stdout'])
+        self.assertEqual(sorted(self.folder.rglob('*')),before)
 
     def test_second_capture_process_cannot_bypass_project_lock(self):
         (self.folder/'.capture.lock').write_text('{"pid":123}',encoding='utf-8')

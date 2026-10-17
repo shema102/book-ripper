@@ -7,6 +7,12 @@ area. Use stable brightness, remove glare, and inspect actual letters before cho
 the smallest font. Avoid status bars, navigation buttons and page counters in the crop.
 Keep the Android phone connected by USB if using ADB.
 
+Capture settings are on three tabs beside the preview: **Setup** (camera device, size,
+FPS, FourCC; ADB executable and device), **Image** (focus, exposure, white balance,
+camera brightness, phone screen brightness — everything that changes how the photo
+looks) and **Scanning** (page counter, page indicator OCR, next-page gesture and its
+tests, run settings and quality thresholds).
+
 In the UI create a new project. Choose the backend first, then open the **Camera**
 dropdown: it lists device names in that backend's index order without opening any
 camera (Windows and Linux). Index order differs between backends — DirectShow also
@@ -42,7 +48,7 @@ preview open each click is saved and applied immediately. Stepping past the came
 range keeps the last value it accepted and says so in the status bar.
 
 Select **Start preview / apply** again to apply: these controls change on the open
-camera without restarting it. The Camera tab shows the value the camera reports back
+camera without restarting it. The Image tab shows the value the camera reports back
 after each apply; if it did not change, the driver ignored it. Changing source, backend,
 size, FPS or FourCC, or returning a control to Camera default, needs **Close preview**
 and a fresh start. Rejected controls are also logged.
@@ -57,7 +63,7 @@ sharp — check with **Test crop**.
 Once the page indicator is calibrated, tick **Indicator OCR view** to see, in the
 preview's top-left corner, the indicator exactly as Tesseract receives it (black on
 white after background flattening and thresholding) and a live reading about twice a
-second, using the Scan tab's indicator settings. Broken-up digits mean too small or
+second, using the Scanning tab's Page indicator OCR settings. Broken-up digits mean too small or
 soft; black blobs mean glare or a lighting-band edge; a clean image that still misreads
 points at the OCR model or indicator format. Like peaking, it only changes the preview.
 
@@ -82,7 +88,7 @@ not rotated, and capture settings are unaffected. Save settings keeps the view.
   checked at full resolution.
 - **Next-page gesture** (needs the phone screen): with gesture kind *tap* click
   once; with *swipe* click the start, then the end. The ADB gesture fields are filled
-  in with the matching screen fractions. Save settings and use **Test next page**.
+  in with the matching screen fractions. Save settings and use **Next page ▶**.
 
 Use **Test crop** and inspect its full-resolution scrolling view (and the indicator
 crop, when set). It saves `calibration/crop.png`, `screen.png` and `indicator.png`.
@@ -90,14 +96,38 @@ Save settings. Opening the camera with different settings clears all calibrated
 regions, because they are camera-pixel positions.
 The sharpness threshold is a rejection aid; calibrate it against actual sample text.
 
-## ADB / navigation
+**OCR test** runs the book OCR on the current text crop with the Book generation tab's
+settings (models, PSM, scale) and opens a window with the crop beside the text exactly
+as Review and the EPUB would get it: a blank line is a paragraph break, and wrapping
+inside a paragraph is only the window's. Words below 80 confidence are highlighted
+yellow; Latin look-alikes re-read without `eng` (see GENERATION.md) blue. Confidence
+does not catch every error, so read the text against the crop. Nothing is saved.
+
+## Phone, counter and gestures
 
 Enable Android developer options and USB debugging, authorize this PC on the phone,
-and choose the executable and explicit device serial. **Refresh devices** lists
-authorized devices (the ↻ button next to the serial). No package name is needed:
+and choose the executable and explicit device serial on the Setup tab; the ↻ button
+next to the serial lists authorized devices. No package name is needed:
 open the reader on the phone, and the app in front at the first ADB read or gesture
 is treated as the reader. Input stops if another app (notification shade, a popup,
 the launcher) takes focus later. `"package"` in `project.json` can optionally pin it.
+
+### Screen flicker (diagonal stripes)
+
+OLED phones dim by pulsing the screen (PWM) at every brightness. A short shutter
+catches some sensor rows while the screen is off: diagonal light/dark stripes that
+stand nearly still, because 30 FPS locks to the screen's refresh. Focus and resolution
+do not change them. The cure is a long shutter spanning many pulses with a dim screen
+so the page does not clip. On a Samsung at 120 Hz with a C920, brightness 10 and 1/16 s
+cut banding from about 6 % to 1 % (1/32 s with brightness 10: 2.5 %, keeps 30 FPS);
+1/1024 s produced hard black stripes that broke OCR layout. Dim screens show room
+reflections more, so keep lights off the glass.
+
+**Screen brightness** (Image tab → Phone screen; 1–255, blank = leave alone) is applied over ADB when an ADB
+capture starts and the previous level and auto-brightness mode are restored when it
+ends, also after an error. **Set** and the step buttons (±1, ±10) apply it immediately,
+for preview and Test crop.
+Manual mode sends nothing to the phone, so set brightness there yourself.
 
 Verified mode needs an accessible page counter. The default regex recognizes
 `Page 1 / 265`, `Сторінка 1 / 265`, and `1 / 265`. Its two groups must be page and
@@ -111,14 +141,15 @@ are screen fractions:
 ```
 
 For a right-edge tap use `{"kind":"tap","end":[0.9,0.5]}`; leave the other fields
-present in `project.json`. **Test next page** sends one real gesture. Check that it
-advances exactly one page; then manually return to the desired starting page.
+present in `project.json`. **Next page ▶** sends one real gesture. Check that it
+advances exactly one page; **◀ Previous page** sends the reverse gesture (a swipe end →
+start, a tap mirrored left↔right) to go back.
 
 The application does not change font settings, seek through the book, or toggle
 reader controls. If the app has no accessible counter, choose optical or manual mode.
 
 **Optical mode** reads the counter from the camera instead of ADB: calibrate the page
-indicator (Capture tab) and, on the Scan tab, describe it in **Indicator format** with
+indicator (Calibrate, under the preview) and, on the Scanning tab, describe it in **Format** with
 `{page}` and `{total}` where the numbers are:
 
 | Reader shows | Indicator format |
@@ -134,10 +165,10 @@ and each label letter also accepts its usual misreads (`Pag6`, `P4ge`, `Раде
 unreadable or ambiguous indicator stops capture; it is never guessed.
 
 The indicator Tesseract (default: the bundled copy, else PATH), optional tessdata folder
-and model are on the Scan tab too; `eng` suffices for Latin labels, use e.g.
+and model are in the same Page indicator OCR section; `eng` suffices for Latin labels, use e.g.
 `ukr+eng` for Cyrillic ones. Optical mode still needs ADB and the serial to
 turn pages. The indicator must stay visible on every page. **Read counter** and
-**Test next page** use the camera in this mode; **Test crop** also shows what
+**Next page ▶** use the camera in this mode; **Test crop** also shows what
 Tesseract reads.
 
 **Manual mode**: count 1, known total, one capture per click, and advance the reader

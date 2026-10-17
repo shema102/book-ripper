@@ -210,8 +210,10 @@ mark it as an image page.
 
 Chapter titles are supplied during review. There is no book-specific automatic
 51-chapter map, fixed drop-cap coordinate, dedication text, or publisher correction
-in the new engine. Decorative initials, diagrams, footnotes and unusual layouts
-need review. Choose image preservation when appropriate.
+in the new engine. Lines beside a drop cap stay one paragraph (layout ignores the
+OCR block change there), but with page-layout PSM 3 Tesseract usually drops the
+initial letter itself, so chapter openings need review. Diagrams, footnotes and
+unusual layouts need review too. Choose image preservation when appropriate.
 
 ## Project files and contract
 

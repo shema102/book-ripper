@@ -121,7 +121,7 @@ def defaults():
                        "auto_white_balance": None, "white_balance": None},
             "corners": [], "screen_corners": [], "indicator_corners": [], "preview_rotation": 0, "settle_seconds": 1.0, "minimum_sharpness": 0.0,
             "minimum_difference": .6, "counter_mode": "verified", "total": 1,
-            "adb": "adb", "serial": "", "package": "",
+            "adb": "adb", "serial": "", "package": "", "screen_brightness": None,
             "tesseract": "tesseract", "tessdata": "", "indicator_language": "eng", "indicator_format": "{page}/{total}",
             "counter_regex": r"(?i)\s*(?:(?:Page|Сторінка)\s+)?(\d+)\s*/\s*(\d+)\s*",
             "gesture": {"kind": "swipe", "start": [.8, .55], "end": [.2, .55], "duration_ms": 300}},

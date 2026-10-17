@@ -28,6 +28,16 @@ keep the licence notices of Tesseract and the copied libraries with it.
  OCR language names use Tesseract codes (`ukr`,
 `eng`, `ukr+eng`), while EPUB language uses a language tag (`uk`, `en`).
 
+With `eng` beside another script's model (`ukr+eng`), letters shared by both alphabets
+are often read as Latin: `He` for `не`, `Apeca` for `Ареса`, `Tc-¢` for `Тс-с`. When a
+page is mostly non-Latin and has such words — every Latin letter has a Cyrillic twin
+(A, B, C, E, H, I, K, M, O, P, T, X, a, c, e, i, o, p, x, y, r, u, n, t …) or an
+eng-only symbol like `¢` — the page is read once more without `eng`, and those words
+take that reading. Real English words nearly always contain a letter without a twin
+(`iPhone`, `Apple`, `Nike`) and stay; an all-twin English word such as `TEXT` becomes
+Cyrillic, so check those in Review. `ukr` alone avoids the confusion entirely but
+garbles every English word. A free-standing `-` or `--` becomes the dash `—`.
+
 Use **Check Tesseract / models** before OCR. Missing models cause an explicit error.
 Models are available from the official [tessdata_best](https://github.com/tesseract-ocr/tessdata_best)
 and [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast) repositories.

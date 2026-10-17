@@ -28,8 +28,8 @@ NUDGE = {'focus': (5, 25, 0), 'exposure': (1, 2, None), 'white_balance': (100, 5
 # Typical ranges only: OpenCV cannot ask the driver for a control's limits. Keyed by backend; '' = any.
 CAMERA_HINTS = {
     'focus': {'': 'Usually 0–255, often in steps of 5. Which end focuses close differs per camera: try a few values and compare letters in Test crop.'},
-    'exposure': {'': 'Shutter time such as 1/30, 1/60, 1/125 (60 also means 1/60; 2s = two seconds). This backend only takes powers of two: 1/60 becomes 1/64. + / − = 1 EV (double / half the light), ++ / −− = 2 EV. Slower than one frame (1/30 at 30 FPS) lowers FPS.',
-                 'v4l2': 'Shutter time such as 1/30, 1/60, 1/125 (60 also means 1/60; 2s = two seconds). + / − = 1 EV (double / half the light), ++ / −− = 2 EV. Slower than one frame (1/30 at 30 FPS) lowers FPS.',
+    'exposure': {'': 'Shutter time such as 1/30, 1/60, 1/125 (60 also means 1/60; 2s = two seconds). This backend only takes powers of two: 1/60 becomes 1/64. + / − = 1 EV (double / half the light), ++ / −− = 2 EV. Slower than one frame (1/30 at 30 FPS) lowers FPS. Diagonal stripes on a phone screen are its flicker: use a long shutter (1/16–1/32) with a dim screen (Phone screen, below), not a short one.',
+                 'v4l2': 'Shutter time such as 1/30, 1/60, 1/125 (60 also means 1/60; 2s = two seconds). + / − = 1 EV (double / half the light), ++ / −− = 2 EV. Slower than one frame (1/30 at 30 FPS) lowers FPS. Diagonal stripes on a phone screen are its flicker: use a long shutter (1/16–1/32) with a dim screen (Phone screen, below), not a short one.',
                  'avfoundation': 'macOS cameras usually ignore manual exposure through OpenCV.'},
     'white_balance': {'': 'Colour temperature in kelvin, usually 2800–6500. Phone screens are near 6500. Page looks yellow → lower it; bluish → raise it.'},
     'brightness': {'': 'Image offset, usually 0–255 with 128 ≈ neutral (some drivers −64 … 64). Prefer exposure; leave blank unless needed.'}}
@@ -39,9 +39,11 @@ CALIBRATION = {
     'Phone screen': ('screen_corners', '#f0b44c', 'Click the whole lit phone screen: top-left → top-right → bottom-right → bottom-left. Aligns taps and swipes with the photo.'),
     'Page indicator': ('indicator_corners', '#6fa8ff', 'Click around the page indicator (e.g. 12 / 345): top-left → top-right → bottom-right → bottom-left.'),
     'Next-page gesture': ('gesture', '#ff6b8a', 'Click where the next-page tap lands, or the swipe start then its end, inside the marked screen.')}
+# OCR test: words below this Tesseract confidence are highlighted for a closer look.
+LOW_CONFIDENCE = 80
 PHONE_MODES = {
     'verified': 'Reads the counter from the reader\'s accessibility text over ADB before and after every turn. The regex needs two groups: page and total.',
-    'optical': 'Reads the calibrated page indicator from the camera image (Scan tab settings); ADB only sends the gestures.',
+    'optical': 'Reads the calibrated page indicator from the camera image (Page indicator OCR, below); ADB only sends the gestures.',
     'manual': 'Saves one photo per click and never sends ADB input; turn the page yourself.'}
 
 
@@ -150,81 +152,125 @@ class App:
         widget.pack(side='left', padx=3, pady=3)
         return widget
 
+    def scrolled(self, notebook, title):
+        """A notebook tab whose content scrolls vertically when the window is too short for it."""
+        outer = ttk.Frame(notebook)
+        notebook.add(outer, text=title)
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        bar = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        inner = ttk.Frame(canvas, padding=8)
+        window = canvas.create_window(0, 0, window=inner, anchor='nw')
+        inner.bind('<Configure>', lambda event: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>', lambda event: canvas.itemconfigure(window, width=event.width))
+        canvas.configure(yscrollcommand=bar.set)
+        background = ttk.Style().lookup('TFrame', 'background')
+        if background: canvas.configure(background=background)
+        bar.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+        # The wheel scrolls whichever tab is under the pointer.
+        wheel = lambda event: canvas.yview_scroll(-1 if (event.delta > 0 or event.num == 4) else 1, 'units')
+        def enter(_):
+            for sequence in ('<MouseWheel>', '<Button-4>', '<Button-5>'): canvas.bind_all(sequence, wheel)
+        def leave(_):
+            for sequence in ('<MouseWheel>', '<Button-4>', '<Button-5>'): canvas.unbind_all(sequence)
+        outer.bind('<Enter>', enter)
+        outer.bind('<Leave>', leave)
+        return inner
+
+    def nudges(self, parent, row, step):
+        """-- / - / + / ++ buttons calling step(direction, large)."""
+        frame = ttk.Frame(parent)
+        frame.grid(row=row, column=1, sticky='w')
+        for text, direction, large in [('--',-1,True),('-',-1,False),('+',1,False),('++',1,True)]:
+            ttk.Button(frame, text=text, width=4, command=lambda direction=direction, large=large:
+                       self.safe(lambda: step(direction, large))).pack(side='left', padx=(0,2))
+        return frame
+
     def _capture_ui(self):
-        left = ttk.Frame(self.capture_tab, width=360)
+        left = ttk.Frame(self.capture_tab, width=380)
         left.pack(side='left', fill='y', padx=(0, 12))
+        left.pack_propagate(False)
         settings = ttk.Notebook(left)
         settings.pack(fill='both', expand=True)
-        camera, phone, scan = (ttk.Frame(settings, padding=8) for _ in range(3))
-        for frame, title in [(camera, 'Camera'), (phone, 'ADB / navigation'), (scan, 'Scan')]:
-            settings.add(frame, text=title)
+        # Setup: which camera and phone. Image: what the photo looks like. Scanning: how pages are read and turned.
+        setup, image, scan = (self.scrolled(settings, title) for title in ('Setup', 'Image', 'Scanning'))
+        hint = lambda parent, text, row, columns=2: ttk.Label(parent, text=text, wraplength=300, foreground='gray35').grid(
+            row=row, column=0, columnspan=columns, sticky='w', pady=(4, 0))
+        camera, device = (ttk.LabelFrame(setup, text=title, padding=6) for title in ('Camera', 'Phone (ADB)'))
+        for frame in (camera, device): frame.pack(fill='x', pady=(0, 6))
         fields = [('Backend', 'backend', ['auto','dshow','msmf','v4l2','avfoundation']), ('Camera', 'source', []),
                   ('Width', 'width', None), ('Height', 'height', None), ('FPS', 'fps', None), ('FourCC (blank = default)', 'fourcc', None)]
         for row, (label, name, choices) in enumerate(fields):
             self.field(camera, label, 'camera.'+name, row, choices, 17)
         self.source_widget = camera.grid_slaves(row=1, column=1)[0]
         self.source_widget.configure(postcommand=lambda: self.safe(self.list_cameras))
+        hint(camera, 'These need Close preview, then Start preview. Backend auto = DirectShow on Windows. Open Camera to pick a device; an index, path or URL can also be typed.', len(fields))
+        self.field(device, 'ADB executable', 'capture.adb', 0, width=17)
+        self.serial_widget = self.field(device, 'Device serial', 'capture.serial', 1, choices=[], width=17)
+        ttk.Button(device, text='↻', width=3, command=lambda: self.safe(self.refresh_devices)).grid(row=1, column=2, padx=(3,0))
+        hint(device, 'Open the reader on the phone; the app in front at the first ADB read or gesture is treated as the reader, and input stops if another app takes over.', 2, 3)
+        controls, screen = (ttk.LabelFrame(image, text=title, padding=6) for title in ('Camera', 'Phone screen'))
+        for frame in (controls, screen): frame.pack(fill='x', pady=(0, 6))
         self.camera_hints, self.manual_widgets = {}, {}
-        row = len(fields)
+        row = 0
         for label, mode, value in CAMERA_MODES:
-            self.field(camera, label, 'camera.'+mode, row, list(MODE_NAMES), 17).state(['readonly'])
-            self.field(camera, '    Manual value', 'camera.'+value, row+1, width=17)
-            nudge = ttk.Frame(camera)
-            nudge.grid(row=row+2, column=1, sticky='w')
-            for text, direction, large in [('--',-1,True),('-',-1,False),('+',1,False),('++',1,True)]:
-                ttk.Button(nudge, text=text, width=4, command=lambda value=value, direction=direction, large=large:
-                           self.safe(lambda: self.nudge(value, direction, large))).pack(side='left', padx=(0,2))
-            self.manual_widgets[mode] = camera.grid_slaves(row=row+1)+[nudge]
-            self.camera_hints[mode] = ttk.Label(camera, wraplength=300, foreground='gray35')
+            self.field(controls, label, 'camera.'+mode, row, list(MODE_NAMES), 17).state(['readonly'])
+            self.field(controls, '    Manual value', 'camera.'+value, row+1, width=17)
+            nudge = self.nudges(controls, row+2, lambda direction, large, value=value: self.nudge(value, direction, large))
+            self.manual_widgets[mode] = controls.grid_slaves(row=row+1)+[nudge]
+            self.camera_hints[mode] = ttk.Label(controls, wraplength=300, foreground='gray35')
             self.camera_hints[mode].grid(row=row+3, column=0, columnspan=2, sticky='w', pady=(0,4))
             self.variables['camera.'+mode].trace_add('write', self.show_camera_hints)
             row += 4
-        self.field(camera, 'Brightness (blank = default)', 'camera.brightness', row, width=17)
-        self.camera_hints['brightness'] = ttk.Label(camera, wraplength=300, foreground='gray35')
+        self.field(controls, 'Brightness (blank = default)', 'camera.brightness', row, width=17)
+        self.camera_hints['brightness'] = ttk.Label(controls, wraplength=300, foreground='gray35')
         self.camera_hints['brightness'].grid(row=row+1, column=0, columnspan=2, sticky='w', pady=(0,4))
         self.variables['camera.backend'].trace_add('write', self.show_camera_hints)
         self.reported = None
-        ttk.Label(camera, text='Focus, exposure, white balance and brightness apply live with Start preview / apply. Source, backend, size, FPS and FourCC need Close preview, then Start preview. Backend auto = DirectShow on Windows. Open Camera to pick a device; an index, path or URL can also be typed.', wraplength=300).grid(row=row+2,column=0,columnspan=2,sticky='w',pady=10)
-        device, counter, gesture = (ttk.LabelFrame(phone,text=title,padding=6) for title in ('Device','Page counter','Next-page gesture'))
-        for frame in (device, counter, gesture): frame.pack(fill='x',pady=(0,6))
-        self.field(device, 'ADB executable', 'capture.adb', 0, width=20)
-        self.serial_widget = self.field(device, 'Device serial', 'capture.serial', 1, choices=[], width=20)
-        ttk.Button(device,text='↻',width=3,command=lambda:self.safe(self.refresh_devices)).grid(row=1,column=2,padx=(3,0))
-        ttk.Label(device,text='Open the reader on the phone; the app in front at the first ADB read or gesture is treated as the reader, and input stops if another app takes over.',wraplength=300,foreground='gray35').grid(row=2,column=0,columnspan=3,sticky='w',pady=(4,0))
-        self.field(counter, 'Mode', 'capture.counter_mode', 0, ['verified','optical','manual'], 20).state(['readonly'])
-        self.field(counter, 'Counter regex', 'capture.counter_regex', 1, width=20)
+        hint(controls, 'These apply live with Start preview / apply, or at once with the step buttons.', row+2)
+        self.field(screen, 'Screen brightness', 'capture.screen_brightness', 0, width=17)
+        ttk.Button(screen, text='Set', width=4, command=lambda: self.safe(self.set_brightness)).grid(row=0, column=2, padx=(3,0))
+        self.nudges(screen, 1, self.nudge_screen)
+        hint(screen, '1–255 over ADB; blank = leave the phone alone. Held during ADB capture and restored afterwards; Set and the step buttons apply it now. OLED screens flicker: diagonal stripes in the preview mean a dimmer screen (about 10) with a longer shutter (1/16–1/32).', 2, 3)
+        counter, indicator, gesture, run = (ttk.LabelFrame(scan, text=title, padding=6) for title in ('Page counter', 'Page indicator OCR', 'Next-page gesture', 'Run'))
+        for frame in (counter, indicator, gesture): frame.pack(fill='x', pady=(0, 6))
+        self.field(counter, 'Mode', 'capture.counter_mode', 0, ['verified','optical','manual'], 17).state(['readonly'])
+        self.field(counter, 'Counter regex', 'capture.counter_regex', 1, width=17)
         self.regex_widgets = counter.grid_slaves(row=1)
-        self.mode_hint = ttk.Label(counter,wraplength=300,foreground='gray35')
-        self.mode_hint.grid(row=2,column=0,columnspan=2,sticky='w',pady=(4,0))
-        self.field(gesture, 'Kind', 'gesture.kind', 0, ['swipe','tap'], 20).state(['readonly'])
+        self.mode_hint = ttk.Label(counter, wraplength=300, foreground='gray35')
+        self.mode_hint.grid(row=2, column=0, columnspan=2, sticky='w', pady=(4,0))
+        for row, (label, key) in enumerate([('Format','indicator_format'),('Tesseract','tesseract'),('Tessdata (optional)','tessdata'),('OCR model','indicator_language')]):
+            self.field(indicator, label, 'capture.'+key, row, width=17)
+        hint(indicator, 'Format: how the reader shows the counter, e.g. Page {page}/{total} or {page} of {total}; only the numbers are read. Once the indicator is calibrated, every photo\'s indicator must read as the page being saved, in any mode. Tesseract "tesseract" uses the bundled copy when present.', 4, 3)
+        self.field(gesture, 'Kind', 'gesture.kind', 0, ['swipe','tap'], 17).state(['readonly'])
         self.swipe_widgets = []
-        for row, (label,key) in enumerate([('Start x / y','s'),('End / tap x / y','e'),('Duration ms','duration_ms')],1):
-            if key == 'duration_ms': self.field(gesture,label,'gesture.'+key,row,width=20)
+        for row, (label, key) in enumerate([('Start x / y','s'),('End / tap x / y','e'),('Duration ms','duration_ms')], 1):
+            if key == 'duration_ms': self.field(gesture, label, 'gesture.'+key, row, width=17)
             else:
-                ttk.Label(gesture,text=label).grid(row=row,column=0,sticky='w',pady=3,padx=(0,7))
+                ttk.Label(gesture, text=label).grid(row=row, column=0, sticky='w', pady=3, padx=(0,7))
                 pair = ttk.Frame(gesture)
-                pair.grid(row=row,column=1,sticky='w',pady=3)
+                pair.grid(row=row, column=1, sticky='w', pady=3)
                 for axis in 'xy':
                     self.variables[f'gesture.{key}{axis}'] = tk.StringVar()
-                    ttk.Entry(pair,textvariable=self.variables[f'gesture.{key}{axis}'],width=8).pack(side='left',padx=(0,4))
+                    ttk.Entry(pair, textvariable=self.variables[f'gesture.{key}{axis}'], width=8).pack(side='left', padx=(0,4))
             if key != 'e': self.swipe_widgets += gesture.grid_slaves(row=row)
-        ttk.Label(gesture,text='Screen fractions, 0–1 from the top-left. Or place it on the preview: Calibrate → Next-page gesture.',wraplength=300,foreground='gray35').grid(row=4,column=0,columnspan=2,sticky='w',pady=(4,0))
-        actions = ttk.Frame(phone)
-        actions.pack(fill='x')
-        self.button(actions,'Read counter',self.read_counter)
-        self.button(actions,'Test next page',self.test_turn)
-        self.variables['capture.counter_mode'].trace_add('write',self.show_phone_fields)
-        self.variables['gesture.kind'].trace_add('write',self.show_phone_fields)
+        hint(gesture, 'Screen fractions, 0–1 from the top-left, or place it on the preview: Calibrate → Next-page gesture. Previous page reverses the swipe, or mirrors the tap left↔right.', 4)
+        tests = ttk.Frame(gesture)
+        tests.grid(row=5, column=0, columnspan=2, sticky='w', pady=(6,0))
+        self.button(tests, 'Read counter', self.read_counter)
+        self.button(tests, '◀ Previous page', lambda: self.test_turn(back=True))
+        self.button(tests, 'Next page ▶', self.test_turn)
+        self.variables['capture.counter_mode'].trace_add('write', self.show_phone_fields)
+        self.variables['gesture.kind'].trace_add('write', self.show_phone_fields)
+        run.pack(fill='x', pady=(0, 6))
         self.start_var = tk.StringVar(value='1')
         self.count_var = tk.StringVar(value='3')
-        for row, (label,var) in enumerate([('Start / next unsaved page',self.start_var),('Pages this run (sample: 3)',self.count_var)]):
-            ttk.Label(scan,text=label).grid(row=row,column=0,sticky='w',pady=4)
-            ttk.Entry(scan,textvariable=var,width=10).grid(row=row,column=1,sticky='ew')
-        for row,(label,key) in enumerate([('Total (manual mode)','total'),('Settle seconds','settle_seconds'),('Minimum sharpness','minimum_sharpness'),('Minimum image difference','minimum_difference')],2):
-            self.field(scan,label,'capture.'+key,row,width=14)
-        for row,(label,key) in enumerate([('Indicator format','indicator_format'),('Indicator Tesseract','tesseract'),('Indicator tessdata (optional)','tessdata'),('Indicator OCR model','indicator_language')],6):
-            self.field(scan,label,'capture.'+key,row,width=14)
-        ttk.Label(scan,text='Indicator format: how the reader shows the counter, with {page} and {total} where the numbers are, e.g. Page {page}/{total} or {page} of {total}. Only the numbers are read; a misread label is ignored. Tesseract "tesseract" uses the bundled copy when present.\n\nOnce the indicator is calibrated, every photo\'s indicator must read as the page being saved, in any mode.\n\nManual mode: set count to 1 and advance the\nreader yourself after each saved photo.\n\nKeep font, spacing, brightness, orientation and\nstand position fixed for the whole project.\n\nStop is checked between photos and gestures.\nAn in-progress ADB read may take up to 30 s.',wraplength=315).grid(row=10,column=0,columnspan=2,sticky='w',pady=12)
+        for row, (label, var) in enumerate([('Start / next unsaved page',self.start_var),('Pages this run (sample: 3)',self.count_var)]):
+            ttk.Label(run, text=label).grid(row=row, column=0, sticky='w', pady=3, padx=(0,7))
+            ttk.Entry(run, textvariable=var, width=17).grid(row=row, column=1, sticky='ew', pady=3)
+        for row, (label, key) in enumerate([('Total (manual mode)','total'),('Settle seconds','settle_seconds'),('Minimum sharpness','minimum_sharpness'),('Minimum image difference','minimum_difference')], 2):
+            self.field(run, label, 'capture.'+key, row, width=17)
+        hint(run, 'Manual mode: count 1, and advance the reader yourself after each saved photo. Keep font, spacing, brightness, orientation and stand position fixed for the whole project. Stop is checked between photos and gestures; an ADB read in progress may take up to 30 s.', 6)
         right = ttk.Frame(self.capture_tab)
         right.pack(fill='both', expand=True)
         self.preview = tk.Canvas(right, background='#18212b', highlightthickness=0)
@@ -253,6 +299,7 @@ class App:
         self.button(actions,'Mark',self.begin_mark)
         self.button(actions,'Clear',self.clear_mark)
         self.button(actions,'Test crop',self.test_crop)
+        self.button(actions,'OCR test',self.ocr_test)
         actions = ttk.Frame(right)
         actions.pack(fill='x')
         for text,action in [('Start preview / apply',self.start_preview),('Close preview',self.close_camera)]:
@@ -396,6 +443,9 @@ class App:
                     var.set(shutter_text(exposure_seconds(value,backend)))
                 else: value = float(value)
             elif name in floating: value = float(value) if value else None
+            elif name == 'screen_brightness':
+                value = int(value) if value else None
+                if value is not None and not 1 <= value <= 255: raise ValueError('Screen brightness must be 1–255, or blank to leave it alone.')
             elif name in MODE_KEYS:
                 if value not in MODE_NAMES: raise ValueError(f'{name.replace("_"," ").capitalize()} must be one of: '+', '.join(MODE_NAMES)+'.')
                 value = MODE_NAMES[value]
@@ -747,6 +797,58 @@ class App:
             config = copy.deepcopy(self.config['capture'])
             self.work(lambda: self.indicator_text(config,image))
 
+    def ocr_test(self):
+        """Book OCR of the current text crop with the Book generation settings, shown as Review would get it."""
+        if not self.camera: raise ValueError('Start camera preview first.')
+        if len(self.regions['corners'])!=4: raise ValueError('Calibrate the text area first.')
+        config = self.collect_settings()['book']
+        _,image = self.camera.frame()
+        crop = rectify(image,self.regions['corners'],REGIONS['corners'][1])
+        def job():
+            values,lines = generation.ocr_test(crop,config)
+            self.events.put(('ocr_test',(crop,values,lines,config)))
+            return f'OCR test: {len(values)} paragraph(s), {sum(len(line["words"]) for line in lines)} words.'
+        self.work(job)
+
+    def ocr_window(self,crop,values,lines,config):
+        window = tk.Toplevel(self.root)
+        window.title('OCR test — text as the book will get it')
+        window.geometry('1150x780')
+        words = [word for line in lines for word in line['words']]
+        mean = sum(word['confidence'] for word in words)/len(words) if words else 0
+        ttk.Label(window,padding=(8,6),wraplength=1100,text=f'{config["ocr_language"]}, PSM {config["psm"]}, scale {config["scale"]} · '
+                  f'{len(values)} paragraph(s), {len(words)} words, mean confidence {mean:.0f} · yellow: confidence below {LOW_CONFIDENCE}; blue: Latin look-alike re-read without eng ({sum("ocr_text" in word for word in words)}). '
+                  "Blank line = paragraph break, as Review and the EPUB get it; wrapping inside a paragraph is only this window's.").pack(fill='x')
+        panes = ttk.Panedwindow(window,orient='horizontal')
+        panes.pack(fill='both',expand=True,padx=8,pady=(0,8))
+        picture = tk.Canvas(panes,background='#273442',highlightthickness=0,width=420)
+        panes.add(picture,weight=2)
+        def fit(event):
+            scale = min(event.width/crop.width,event.height/crop.height)
+            picture.photo = ImageTk.PhotoImage(crop.resize((max(1,round(crop.width*scale)),max(1,round(crop.height*scale))),Image.Resampling.LANCZOS))
+            picture.delete('all');picture.create_image(event.width/2,event.height/2,image=picture.photo)
+        picture.bind('<Configure>',fit)
+        frame = ttk.Frame(panes)
+        panes.add(frame,weight=3)
+        text = tk.Text(frame,wrap='word',font=('TkDefaultFont',11),padx=8,pady=6)
+        scroll = ttk.Scrollbar(frame,command=text.yview)
+        scroll.pack(side='right',fill='y');text.pack(side='left',fill='both',expand=True)
+        text.configure(yscrollcommand=scroll.set)
+        content = '\n\n'.join(value['text'] for value in values) or '(no text recognized)'
+        text.insert('1.0',content)
+        text.tag_configure('low',background='#ffe08a')
+        text.tag_configure('fixed',background='#bfe0ff')
+        # Words appear in reading order in the joined text; a dehyphenated word may lose its trailing '-'.
+        cursor = 0
+        for word in words:
+            for token in (word['text'],word['text'].rstrip('-')):
+                at = content.find(token,cursor) if token else -1
+                if at >= 0: break
+            else: continue
+            if 'ocr_text' in word: text.tag_add('fixed',f'1.0+{at}c',f'1.0+{at+len(token)}c')
+            elif word['confidence'] < LOW_CONFIDENCE: text.tag_add('low',f'1.0+{at}c',f'1.0+{at+len(token)}c')
+            cursor = at+len(token)
+
     def indicator_text(self,config,image):
         reading = read_indicator(image,config)
         found = f'{reading["page"]}/{reading["total"]}' if reading['page'] else 'no single counter-regex match'
@@ -758,6 +860,25 @@ class App:
         if config['counter_mode']=='optical' and not ready:
             raise ValueError('Optical mode reads the counter from the camera: calibrate the page indicator and start preview.')
         return self.camera if ready else None
+
+    def nudge_screen(self, direction, large=False):
+        """Step the phone screen brightness (1 or 10 levels; dim screens need fine steps) and apply it at once."""
+        variable = self.variables['capture.screen_brightness']
+        try: value = int(variable.get() or 0)
+        except ValueError: raise ValueError('Screen brightness must be a whole number 1–255.')
+        variable.set(str(min(255, max(1, value + direction*(10 if large else 1)))))
+        self.set_brightness()
+
+    def set_brightness(self):
+        """Apply the screen brightness now, so the preview shows what capture will photograph. Not restored later."""
+        settings = self.collect_settings()
+        config = settings['capture']
+        if not config['screen_brightness']: raise ValueError('Enter a screen brightness (1–255) first.')
+        if self.folder: write_json(self.folder/'project.json',settings)
+        def job():
+            before = android.Phone(config).screen_brightness(config['screen_brightness'])
+            return f'Screen brightness set to {config["screen_brightness"]} (was {before[0]}{", automatic" if before[1] else ""}).'
+        self.work(job)
 
     def refresh_devices(self):
         config = self.collect_settings()['capture']
@@ -780,7 +901,7 @@ class App:
             return ' · '.join(found)
         self.work(job)
 
-    def test_turn(self):
+    def test_turn(self, back=False):
         config = self.collect_settings()['capture']
         if config['counter_mode']=='manual': raise ValueError('Manual mode never sends ADB gestures.')
         camera = self.indicator_camera(config)
@@ -790,10 +911,10 @@ class App:
                 page = lambda: self.indicator_text(config,camera.frame(after=camera.sequence)[1])
             else: page = phone.page
             before=page()
-            phone.turn()
+            phone.turn(back)
             if config['counter_mode']=='optical': time.sleep(float(config['settle_seconds']))
             after=page()
-            return f'Gesture test in {phone.package}: {before} → {after}. Check that exactly one page advanced.'
+            return f'{"Previous" if back else "Next"}-page test in {phone.package}: {before} → {after}. Check that exactly one page {"went back" if back else "advanced"}.'
         self.work(job)
 
     def start_capture(self):
@@ -921,6 +1042,7 @@ class App:
                 kind,value=self.events.get_nowait()
                 if kind=='log': self.log(value)
                 elif kind=='camera': self.camera=value
+                elif kind=='ocr_test': self.ocr_window(*value)
                 elif kind=='indicator': self.indicator_reading,self.indicator_busy,self.indicator_next=value,False,time.monotonic()+.5
                 elif kind=='devices':
                     self.serial_widget.configure(values=value)

@@ -18,7 +18,7 @@ from .capture import validate_manifest
 from .common import digest, fingerprint, inside, read_json, run, tesseract, write_json, locked
 from .layout import paragraph_starts
 
-OCR_VERSION = "geometry-tsv-v1"
+OCR_VERSION = "geometry-tsv-v3"  # v2: drop-cap lines stay one paragraph; v3: Latin look-alikes re-read, free hyphens are dashes
 
 
 def import_images(source, destination):
@@ -64,15 +64,22 @@ def join_text(left, right, config):
     return left + ' ' + right
 
 
-def parse_tsv(text, scale):
-    groups = OrderedDict()
-    for row in csv.DictReader(io.StringIO(text), delimiter='\t', quoting=csv.QUOTE_NONE):
+def tsv_words(text, scale):
+    """Recognized words in source pixels, each with its Tesseract (block, paragraph, line) key."""
+    words = []
+    for row in csv.DictReader(io.StringIO(text), delimiter='	', quoting=csv.QUOTE_NONE):
         value = (row.get('text') or '').strip()
         if row.get('level') != '5' or not value:
             continue
-        key = tuple(int(row[k]) for k in ('block_num', 'par_num', 'line_num'))
-        groups.setdefault(key, []).append({'text': value, 'confidence': float(row['conf']),
-                                           **{k: float(row[k])/scale for k in ('left', 'top', 'width', 'height')}})
+        words.append({'key': tuple(int(row[k]) for k in ('block_num', 'par_num', 'line_num')), 'text': value,
+                      'confidence': float(row['conf']), **{k: float(row[k])/scale for k in ('left', 'top', 'width', 'height')}})
+    return words
+
+
+def group_lines(words):
+    groups = OrderedDict()
+    for word in words:
+        groups.setdefault(word['key'], []).append({k: v for k, v in word.items() if k != 'key'})
     lines = []
     for key, words in groups.items():
         lines.append({'group': list(key[:2]), 'left': min(x['left'] for x in words),
@@ -82,6 +89,34 @@ def parse_tsv(text, scale):
                       'text': ' '.join(x['text'] for x in words),
                       'confidence': statistics.mean(x['confidence'] for x in words), 'words': words})
     return sorted(lines, key=lambda line: (line['top'], line['left']))
+
+
+# Latin letters that Cyrillic (or Greek) glyphs are read as when eng is among the models — В→B, Н→H, г→r, и→u,
+# п→n, т→t … — and symbols only eng outputs. Words made only of these are suspects on a mostly non-Latin page;
+# a real Latin word nearly always has a letter without a twin (h, l, S, N …) and is left alone.
+TWINS, ENG_ONLY = set('AaBbCcEeHIiKkMmOoPpTtXxYyrun'), set('¢£©®€§')
+
+
+def suspect(text):
+    latin = [c for c in text if (c.isascii() and c.isalpha()) or c in ENG_ONLY]
+    return bool(latin) and all(c in TWINS or c in ENG_ONLY for c in latin)
+
+
+def overlap(a, b):
+    width = min(a['left']+a['width'], b['left']+b['width']) - max(a['left'], b['left'])
+    height = min(a['top']+a['height'], b['top']+b['height']) - max(a['top'], b['top'])
+    common = max(0, width) * max(0, height)
+    return common / (a['width']*a['height'] + b['width']*b['height'] - common or 1)
+
+
+def reread_lookalikes(words, other):
+    """Replace suspect words by the same-position reading from the models without eng (other: words of that pass)."""
+    for word in words:
+        if not suspect(word['text']):
+            continue
+        best = max(other, key=lambda candidate: overlap(word, candidate), default=None)
+        if best and overlap(word, best) >= .5 and not any(c.isascii() and c.isalpha() for c in best['text']) and best['text'] != word['text']:
+            word['ocr_text'], word['text'], word['confidence'] = word['text'], best['text'], best['confidence']
 
 
 def paragraphs(lines, width, config):
@@ -100,6 +135,38 @@ def paragraphs(lines, width, config):
                        'top': group[0]['top'], 'bottom': group[-1]['bottom'],
                        'last_line_full': group[-1]['right'] >= metrics['right']-width*.04})
     return result
+
+
+def ocr_page(image, config, command, tessdata):
+    """Tesseract TSV of one page image -> (raw TSV, lines in source pixels). Shared by recognize and the OCR test."""
+    scale = float(config['scale'])
+    gray = ImageOps.autocontrast(image.convert('L'), cutoff=.5)
+    buffer = io.BytesIO()
+    gray.resize((round(image.width*scale), round(image.height*scale)), Image.Resampling.LANCZOS).save(buffer, 'PNG')
+    def tsv(languages):
+        arguments = [command, 'stdin', 'stdout', '-l', languages, '--oem', '1', '--psm', str(config['psm'])]
+        if tessdata:
+            arguments += ['--tessdata-dir', tessdata]
+        return run(arguments+['tsv'], timeout=120, input=buffer.getvalue(), env=dict(os.environ, OMP_THREAD_LIMIT='1')).decode('utf-8', 'replace')
+    raw = tsv(config['ocr_language'])
+    words = tsv_words(raw, scale)
+    # With eng beside another script's model, glyphs shared by both alphabets often come out Latin (НЕ → HE).
+    models = config['ocr_language'].split('+')
+    letters = [c for word in words for c in word['text'] if c.isalpha()]
+    if 'eng' in models and len(models) > 1 and sum(not c.isascii() for c in letters) > len(letters)/2             and any(suspect(word['text']) for word in words):
+        reread_lookalikes(words, tsv_words(tsv('+'.join(model for model in models if model != 'eng')), scale))
+    for word in words:
+        if word['text'] in ('-', '--'):
+            word['text'] = '—'  # a free-standing hyphen is a dash; left as '-', a line-final one would glue to the next line
+    return raw, group_lines(words)
+
+
+def ocr_test(image, config):
+    """One-off OCR of an image with the book settings, exactly as recognize would do it; nothing is cached or written."""
+    if not .5 <= float(config['scale']) <= 4 or int(config['psm']) not in range(14):
+        raise ValueError('OCR scale must be 0.5–4 and PSM must be 0–13.')
+    _, lines = ocr_page(image, config, *tesseract(config))
+    return paragraphs(lines, image.width, config), lines
 
 
 def tesseract_info(config):
@@ -137,8 +204,6 @@ def recognize(folder, config, stop=None, log=print):
             model = Path(model_directory) / (language + '.traineddata')
             if model.exists(): models[language] = digest(model)
     settings = fingerprint({'version': OCR_VERSION, 'engine': version, 'settings': ocr_settings, 'models': models})
-    work = folder / 'ocr' / 'work'
-    work.mkdir(parents=True, exist_ok=True)
     done = 0
     for entry in manifest['pages']:
         if stop.is_set():
@@ -151,32 +216,20 @@ def recognize(folder, config, stop=None, log=print):
                 done += 1
                 log(f'OCR cached: page {number}.')
                 continue
-        image_path = inside(folder, entry['image'])
-        temp = work / (uuid.uuid4().hex + '.png')
-        try:
-            with Image.open(image_path) as original:
-                width, height = original.size
-                gray = ImageOps.autocontrast(original.convert('L'), cutoff=.5)
-                gray.resize((round(width*scale), round(height*scale)), Image.Resampling.LANCZOS).save(temp)
-            arguments = [command, str(temp), 'stdout', '-l', config['ocr_language'], '--oem', '1', '--psm', str(config['psm'])]
-            if tessdata:
-                arguments += ['--tessdata-dir', tessdata]
-            environment = dict(os.environ, OMP_THREAD_LIMIT='1')
-            raw = run(arguments+['tsv'], timeout=120, env=environment).decode('utf-8', 'replace')
-            lines = parse_tsv(raw, scale)
-            values = paragraphs(lines, width, config)
-            record = {'page': number, 'source_sha256': entry['sha256'], 'settings_sha256': settings,
-                      'engine': version, 'paragraphs': values, 'lines': lines,
-                      'mean_confidence': statistics.mean(x['confidence'] for x in lines) if lines else None,
-                      'needs_review': not lines or any(x['confidence'] < 70 for x in lines)}
-            raw_path = folder / 'ocr' / 'raw' / f'{number:05d}.tsv'
-            raw_path.parent.mkdir(parents=True, exist_ok=True)
-            raw_path.write_text(raw, encoding='utf-8')
-            write_json(target, record)
-            done += 1
-            log(f'OCR page {number}/{manifest["total"]}: {len(values)} paragraphs' + ('; REVIEW suggested.' if record['needs_review'] else '.'))
-        finally:
-            temp.unlink(missing_ok=True)
+        with Image.open(inside(folder, entry['image'])) as original:
+            width = original.width
+            raw, lines = ocr_page(original, config, command, tessdata)
+        values = paragraphs(lines, width, config)
+        record = {'page': number, 'source_sha256': entry['sha256'], 'settings_sha256': settings,
+                  'engine': version, 'paragraphs': values, 'lines': lines,
+                  'mean_confidence': statistics.mean(x['confidence'] for x in lines) if lines else None,
+                  'needs_review': not lines or any(x['confidence'] < 70 for x in lines)}
+        raw_path = folder / 'ocr' / 'raw' / f'{number:05d}.tsv'
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(raw, encoding='utf-8')
+        write_json(target, record)
+        done += 1
+        log(f'OCR page {number}/{manifest["total"]}: {len(values)} paragraphs' + ('; REVIEW suggested.' if record['needs_review'] else '.'))
     return done
 
 

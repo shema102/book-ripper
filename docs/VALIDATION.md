@@ -64,6 +64,13 @@ preprocessing read 0 of 63 such frames. ADB reader detection without a configure
 package and the Android 16 `dumpsys window` focus format were verified on the
 same phone.
 
+Screen banding was traced on the same setup: band strength did not change with focus
+(45–75) or capture resolution (720p–1080p), so it is not moiré; at 1/1024 s it became
+hard black stripes even at brightness 200, so it is PWM flicker. Sweeping exposure
+1/4096–1/16 s against brightness 1–255, brightness 10 with 1/16 s gave about 1 %
+banding (from about 6 % at 150 with 1/512 s) with unchanged book OCR confidence (93.7)
+and a correct page indicator.
+
 ## What remains unverified
 
 - The new OpenCV acquisition layer has not run against a physical camera/phone in
@@ -77,7 +84,8 @@ same phone.
 - Geometric paragraph inference is approximate. OCR is not full proofreading;
   confidence values are recognition estimates, not accuracy guarantees.
 - There is no complete multicolumn, table, footnote or decorative-initial layout
-  engine. Manually review those pages or preserve them as images.
+  engine. Manually review those pages or preserve them as images. Lines beside a
+  drop cap keep their paragraph, but the initial letter itself is usually lost.
 - Actual Kindle import/rendering and retail EPUB interoperability beyond EPUBCheck
   have not been tested. The output is an OCR reconstruction.
 

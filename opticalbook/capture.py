@@ -44,7 +44,25 @@ def capture(folder, config, camera, start, count, stop=None, log=print, phone=No
     every photo's own indicator must also read as the page being saved, in any mode.
     Injecting camera/phone objects also makes sequence guards testable without
     sending input to a real device. The caller owns and closes its camera.
+
+    With `screen_brightness` set (ADB modes only), the phone's screen brightness is held
+    at that level for the run and restored afterwards, even when the run stops on an error.
     """
+    level = config.get("screen_brightness")
+    if not level or config["counter_mode"] == "manual":
+        return _capture(folder, config, camera, start, count, stop, log, phone)
+    if not 1 <= int(level) <= 255:
+        raise ValueError("Screen brightness must be 1–255, or blank to leave the phone's setting alone.")
+    phone = phone or Phone(config)
+    before = phone.screen_brightness(level)
+    log(f"Screen brightness {level} for this run (was {before[0]}).")
+    try:
+        return _capture(folder, config, camera, start, count, stop, log, phone)
+    finally:
+        phone.screen_brightness(*before)
+
+
+def _capture(folder, config, camera, start, count, stop, log, phone):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     stop = stop or threading.Event()

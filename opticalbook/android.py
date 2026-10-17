@@ -56,6 +56,17 @@ class Phone:
     def adb(self, *args):
         return run([self.executable, "-s", self.config["serial"], *args], timeout=30).decode("utf-8", "replace")
 
+    def screen_brightness(self, level, mode=0):
+        """Set screen brightness (mode 0 = manual, 1 = automatic); returns the previous (level, mode) to restore.
+        Flickering (PWM) screens band in short exposures: a dim screen allows a long, band-free shutter."""
+        if int(level) < 0 or int(mode) not in (0, 1):
+            raise ValueError("Screen brightness must be a nonnegative level with mode 0 or 1.")
+        before = tuple(int(self.adb("shell", "settings", "get", "system", key).strip())
+                       for key in ("screen_brightness", "screen_brightness_mode"))
+        self.adb("shell", "settings", "put", "system", "screen_brightness_mode", str(int(mode)))
+        self.adb("shell", "settings", "put", "system", "screen_brightness", str(int(level)))
+        return before
+
     def foreground(self):
         """Refuse input unless the focused app is still the reader seen first (or the pinned package)."""
         package = focused(self.adb("shell", "dumpsys", "window"))
@@ -81,7 +92,8 @@ class Phone:
             except Exception:
                 pass
 
-    def turn(self):
+    def turn(self, back=False):
+        """Send the next-page gesture; back=True reverses it (a swipe end → start, a tap mirrored left↔right)."""
         self.foreground()
         dimensions = re.findall(r"(\d+)x(\d+)", self.adb("shell", "wm", "size"))
         if not dimensions:
@@ -93,11 +105,13 @@ class Phone:
                 raise ValueError("Gesture coordinates must be fractions between 0 and 1.")
             return [str(round(float(x) * (size-1))) for x, size in zip(value, (width, height))]
         if gesture["kind"] == "tap":
-            self.adb("shell", "input", "tap", *point(gesture["end"]))
+            end = gesture["end"]
+            self.adb("shell", "input", "tap", *point([1-float(end[0]), end[1]] if back else end))
         elif gesture["kind"] == "swipe":
             duration = int(gesture["duration_ms"])
             if not 1 <= duration <= 5000:
                 raise ValueError("Swipe duration must be 1–5000 milliseconds.")
-            self.adb("shell", "input", "swipe", *point(gesture["start"]), *point(gesture["end"]), str(duration))
+            ends = (gesture["end"], gesture["start"]) if back else (gesture["start"], gesture["end"])
+            self.adb("shell", "input", "swipe", *point(ends[0]), *point(ends[1]), str(duration))
         else:
             raise ValueError("Gesture must be tap or swipe.")

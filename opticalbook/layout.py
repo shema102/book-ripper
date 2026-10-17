@@ -41,6 +41,9 @@ def paragraph_starts(lines, width):
     metrics = layout_metrics(lines, width)
     h, margin, pitch, right = (metrics[k] for k in ('height', 'margin', 'pitch', 'right'))
     reasons = ['page-start']
+    # Inside a section's opening run of equally indented lines: the lines beside a drop cap.
+    # Tesseract often drops the cap and splits its block there, so a group change is no evidence.
+    opening = False
     for previous, line in zip(lines, lines[1:]):
         text = line['text']
         reason = None
@@ -59,10 +62,11 @@ def paragraph_starts(lines, width):
         elif indented:
             hanging = (previous['left'] > margin + h * .65
                        and abs(previous['left'] - line['left']) < h * .35
-                       and not short_previous and not group_changed)
+                       and not short_previous and (opening or not group_changed))
             if not hanging:
                 reason = 'indentation'
         elif group_changed and short_previous:
             reason = 'short-line-and-group'
         reasons.append(reason)
+        opening = indented and (reason in ('vertical-space', 'heading-transition') or (reason is None and opening))
     return reasons, metrics
