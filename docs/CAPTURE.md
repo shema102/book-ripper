@@ -133,7 +133,7 @@ Verified mode needs an accessible page counter. The default regex recognizes
 `Page 1 / 265`, `Сторінка 1 / 265`, and `1 / 265`. Its two groups must be page and
 total. Use **Read counter** with the actual reader open and its counter visible.
 
-Configure a swipe or tap, or place it on the preview (see Calibration). Coordinates
+Configure a swipe or tap, or place it on the preview (see Prepare). Coordinates
 are screen fractions:
 
 ```json

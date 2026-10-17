@@ -1,8 +1,8 @@
 # Validation and current limits
 
-Checked on Windows in this workspace with Python 3.13.1, Pillow 12.3.0, NumPy 2.5.4,
-OpenCV 4.14.0, Tesseract 5.5.3 and EPUBCheck 5.4.0. Dependencies are installed in this
-folder's `.venv`; they are not vendored into the source archive.
+Last checked on Windows with Python 3.13.1, Pillow 12.3.0, NumPy 2.5.4, OpenCV 4.14.0,
+Tesseract 5.5.3 and EPUBCheck 5.4.0. Python dependencies are installed with pip (see the
+README); they are not vendored into the source.
 
 ## Automated workflow checks
 
@@ -11,7 +11,7 @@ python -m unittest discover -s tests -v
 ```
 
 The tests use synthetic photos and fake phone/camera objects, never real phone input.
-Current result: **40 tests passed**.
+Last result: **51 tests passed**.
 They cover expected counter progression, exactly one turn, skipped pages, page
 changes during photographs, duplicate and blur gates, stop, resume and frozen
 settings, manual capture without phone actions, orphan preservation, manifest
@@ -75,9 +75,10 @@ and a correct page indicator.
 
 ## What remains unverified
 
-- The new OpenCV acquisition layer has not run against a physical camera/phone in
-  this packaging turn. Capture sequencing is tested through injected fakes. The
-  original FFmpeg/DirectShow scanner did complete the physical 676-page scan.
+- The OpenCV acquisition layer has been used with a physical webcam and phone (see
+  above), but has not yet completed a full book scan. Capture sequencing is tested
+  through injected fakes. The original FFmpeg/DirectShow scanner did complete a
+  physical 676-page scan.
 - macOS/Linux camera permissions, drivers, Tk packaging and device properties have
   not been exercised. The core uses portable Python APIs, with selected OpenCV
   backends and no unconditional Windows process flags.

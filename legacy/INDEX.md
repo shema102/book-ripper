@@ -1,7 +1,7 @@
 # Collected experiment scripts
 
-Reference copies, not application entry points. The original workspace scripts and
-book outputs remain in place. Most files still assume the original book's geometry,
+Reference copies, not application entry points; the experiment's book outputs are
+not included. Most files still assume the original book's geometry,
 review files or Windows tooling. Personal paths and serial were removed from
 `book_scanner.py`; it now reads `FFMPEG`, `ADB` and `ANDROID_SERIAL` from the environment.
 The new application lives in `../opticalbook/` and does not import this folder.

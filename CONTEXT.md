@@ -17,7 +17,7 @@ generated a Ukrainian EPUB. Its scripts mixed workstation paths, one book's page
 numbers, chapter corrections, Windows APIs and packaging. Those useful scripts
 are retained in `legacy/` for reference; they are not the new application's engine.
 Personal phone identity and workstation paths were removed from that reference
-scanner. Original workspace files were left in place.
+scanner.
 
 The Sony A6400 experiment did not establish a reliable full-resolution tethered
 capture path. Its drivers, service-control attempts and UI automation are not part

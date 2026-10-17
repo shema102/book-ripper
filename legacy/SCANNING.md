@@ -1,5 +1,8 @@
 # Physical-screen book scanner
 
+> Historical run notes from the original experiment. Paths such as `lab/…` and
+> "workspace root" refer to that experiment's folder, not to this repository.
+
 Status: complete. All 676 pages captured and verified. The primary deliverable is
 `Zolotyi-syn-reflowable.epub` in the workspace root (about 2.7 MB). It contains
 reflowable Ukrainian OCR text, 51 visually checked chapter titles, four parts,

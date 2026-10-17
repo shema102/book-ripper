@@ -25,8 +25,8 @@ the default `tesseract`, the bundled copy and its tessdata are used; an explicit
 still wins. `doctor` reports which bundle is present. If you redistribute the bundle,
 keep the licence notices of Tesseract and the copied libraries with it.
 
- OCR language names use Tesseract codes (`ukr`,
-`eng`, `ukr+eng`), while EPUB language uses a language tag (`uk`, `en`).
+OCR language names use Tesseract codes (`ukr`, `eng`, `ukr+eng`), while EPUB language
+uses a language tag (`uk`, `en`).
 
 With `eng` beside another script's model (`ukr+eng`), letters shared by both alphabets
 are often read as Latin: `He` for `не`, `Apeca` for `Ареса`, `Tc-¢` for `Тс-с`. When a
