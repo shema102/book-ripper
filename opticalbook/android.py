@@ -32,23 +32,39 @@ def parse_counter(xml, package, pattern):
     return matches.pop()
 
 
+PACKAGE = r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+"
+
+
+def focused(state):
+    """Package of the focused window in `dumpsys window` output; None if absent or ambiguous.
+    Android 16 prints mCurrentFocus only there, no longer under `dumpsys window windows`."""
+    found = set(re.findall(r"mCurrentFocus=Window\{\S+ u\d+ (" + PACKAGE + r")/", state))
+    return found.pop() if len(found) == 1 else None
+
+
 class Phone:
     def __init__(self, config):
         self.config = config
         self.executable = executable(config["adb"])
         if not config["serial"]:
             raise ValueError("Choose an explicit ADB device serial.")
-        if not re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+", config["package"]):
-            raise ValueError("Set the reader's Android package name, for example com.readeat.app.")
+        # Optional pin in project.json; otherwise the first focused app is locked in as the reader.
+        self.package = config.get("package") or None
+        if self.package and not re.fullmatch(PACKAGE, self.package):
+            raise ValueError("Reader package must look like com.example.reader, or be left empty.")
 
     def adb(self, *args):
         return run([self.executable, "-s", self.config["serial"], *args], timeout=30).decode("utf-8", "replace")
 
     def foreground(self):
-        state = self.adb("shell", "dumpsys", "window", "windows")
-        package = re.escape(self.config["package"])
-        if not re.search(r"mCurrentFocus[^\n]*\s" + package + r"/", state):
-            raise RuntimeError("Configured reader is not foreground. No gesture was sent.")
+        """Refuse input unless the focused app is still the reader seen first (or the pinned package)."""
+        package = focused(self.adb("shell", "dumpsys", "window"))
+        if not package:
+            raise RuntimeError("Cannot tell which app is in the foreground (popup, lock screen or transition). No gesture was sent.")
+        if self.package is None:
+            self.package = package
+        elif package != self.package:
+            raise RuntimeError(f"{package} is in the foreground instead of the reader {self.package}. No gesture was sent.")
 
     def page(self):
         self.foreground()
@@ -58,7 +74,7 @@ class Phone:
             if "dumped to" not in status.lower():
                 raise RuntimeError("Fresh UI dump failed; no old page counter will be reused.")
             xml = self.adb("exec-out", "cat", target)
-            return parse_counter(xml, self.config["package"], self.config["counter_regex"])
+            return parse_counter(xml, self.package,self.config["counter_regex"])
         finally:
             try:
                 self.adb("shell", "rm", "-f", target)

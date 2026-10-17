@@ -5,20 +5,44 @@ import io
 import os
 import re
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 from PIL import Image, ImageOps
 from .common import run, tesseract
 from .imaging import REGIONS, rectify
 
-# Upscaled line height: tiny camera-pixel counters read best around Tesseract's preferred glyph size.
-HEIGHT = 96
+# Upscaled line heights: tiny camera-pixel counters read best around Tesseract's preferred glyph size.
+# Both are read and must agree, so a misread digit becomes "unreadable" rather than a wrong page.
+HEIGHTS = (96, 128)
 
 
-def prepare(crop):
-    gray = ImageOps.autocontrast(crop.convert("L"), cutoff=1)
+def flatten(gray, size):
+    """Divide by the local background, a size×size closing (max then min: removes strokes, keeps smooth ramps),
+    so lighting bands and screen glare become white."""
+    def window(values, reduce):
+        padded = np.pad(values, size // 2, mode="edge")
+        return reduce(sliding_window_view(reduce(sliding_window_view(padded, size, axis=0), -1), size, axis=1), -1)
+    values = np.asarray(gray, float)
+    background = window(window(values, np.max), np.min)
+    return np.clip(values / np.maximum(background, 1) * 255, 0, 255).astype(np.uint8)
+
+
+def otsu(values):
+    histogram = np.bincount(values.ravel(), minlength=256) / values.size
+    weight, mean = np.cumsum(histogram), np.cumsum(histogram * np.arange(256))
+    return int(np.argmax((mean[-1]*weight - mean)**2 / np.maximum(weight*(1-weight), 1e-12)))
+
+
+def prepare(crop, height=HEIGHTS[0]):
+    """Dark-on-white binary line. Tesseract's own global threshold fails on uneven, banded screen photos."""
+    gray = crop.convert("L")
     if np.asarray(gray).mean() < 128:
         gray = ImageOps.invert(gray)  # light text on a dark reader theme
-    width = max(1, round(gray.width * HEIGHT / gray.height))
-    return ImageOps.expand(gray.resize((width, HEIGHT), Image.Resampling.LANCZOS), border=HEIGHT // 3, fill=255)
+    gray = gray.resize((max(1, round(gray.width * height / gray.height)), height), Image.Resampling.LANCZOS)
+    # Kernel ~0.2 line heights: wider than strokes, narrow enough to follow banding (wider kernels failed on real photos).
+    flat = flatten(gray, int(height * .2) | 1)
+    # Ink is at least ~12% darker than its background; the cap keeps Otsu from splitting a near-white background.
+    binary = Image.fromarray(np.where(flat > min(otsu(flat), 224), 255, 0).astype(np.uint8))
+    return ImageOps.expand(binary, border=height // 3, fill=255)
 
 
 # What OCR commonly reads a label letter as at a few pixels high: digits, Cyrillic/Latin twins, symbols.
@@ -73,15 +97,18 @@ def parse_indicator(text, template):
 def read_indicator(frame, config):
     """OCR the page indicator in one camera frame: {'text', 'page', 'total'} (None when unreadable)."""
     crop = rectify(frame, config["indicator_corners"], REGIONS["indicator_corners"][1])
-    buffer = io.BytesIO()
-    prepare(crop).save(buffer, "PNG")
     command, tessdata = tesseract(config)
     template = config["indicator_format"]
     arguments = [command, "stdin", "stdout", "-l", config["indicator_language"], "--oem", "1", "--psm", "7",
                  "-c", "tessedit_char_whitelist=" + whitelist(template)]
     if tessdata:
         arguments += ["--tessdata-dir", tessdata]
-    raw = run(arguments, timeout=30, input=buffer.getvalue(), env=dict(os.environ, OMP_THREAD_LIMIT="1"))
-    text = " ".join(raw.decode("utf-8", "replace").split())
-    page, total = parse_indicator(text, template)
-    return {"text": text, "page": page, "total": total}
+    texts, readings = [], set()
+    for height in HEIGHTS:
+        buffer = io.BytesIO()
+        prepare(crop, height).save(buffer, "PNG")
+        raw = run(arguments, timeout=30, input=buffer.getvalue(), env=dict(os.environ, OMP_THREAD_LIMIT="1"))
+        texts.append(" ".join(raw.decode("utf-8", "replace").split()))
+        readings.add(parse_indicator(texts[-1], template))
+    page, total = readings.pop() if len(readings) == 1 else (None, None)
+    return {"text": " | ".join(dict.fromkeys(texts)), "page": page, "total": total}

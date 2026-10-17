@@ -13,10 +13,10 @@ from xml.etree import ElementTree as ET
 from zipfile import ZipFile, ZIP_STORED
 from PIL import Image, ImageDraw, ImageFilter
 
-from opticalbook.android import Phone, parse_counter
+from opticalbook.android import Phone, focused, parse_counter
 from opticalbook.capture import capture, validate_manifest
 from opticalbook.common import defaults, digest, read_json, write_json
-from opticalbook.indicator import parse_indicator, read_indicator, whitelist
+from opticalbook.indicator import parse_indicator, prepare, read_indicator, whitelist
 from opticalbook.generation import build_epub, import_images, page_record, recognize, save_review
 from opticalbook.__main__ import main
 from opticalbook.imaging import REGIONS, Camera, controls, exposure_raw, exposure_seconds, from_screen, gesture_from, parse_shutter, peaking, rectify, rotate_point, shutter_text, to_screen
@@ -270,11 +270,26 @@ class WorkflowTests(unittest.TestCase):
         config=dict(defaults()['capture'],indicator_corners=[[50,40],[130,40],[130,56],[50,56]],indicator_format='Page {page}/{total}')
         with patch('opticalbook.indicator.tesseract',return_value=('tesseract','models')),patch('opticalbook.indicator.run',return_value=b'Page 12/34\n') as runner:
             self.assertEqual(read_indicator(frame,config),{'text':'Page 12/34','page':12,'total':34})
-        arguments,options=runner.call_args
-        self.assertEqual(arguments[0][:3]+arguments[0][-6:],['tesseract','stdin','stdout','--psm','7','-c','tessedit_char_whitelist=0123456789pPaAgGeE/','--tessdata-dir','models'])
-        sent=Image.open(io.BytesIO(options['input']))
-        self.assertEqual(sent.height,96+2*32)
-        self.assertGreater(__import__('numpy').asarray(sent).mean(),128)  # dark theme inverted to dark-on-light
+        self.assertEqual(runner.call_count,2)
+        for (arguments,options),height in zip(runner.call_args_list,(96,128)):
+            self.assertEqual(arguments[0][:3]+arguments[0][-6:],['tesseract','stdin','stdout','--psm','7','-c','tessedit_char_whitelist=0123456789pPaAgGeE/','--tessdata-dir','models'])
+            sent=Image.open(io.BytesIO(options['input']))
+            self.assertEqual(sent.height,height+2*(height//3))
+            self.assertGreater(__import__('numpy').asarray(sent).mean(),128)  # dark theme inverted to dark-on-light
+        # The two scales must agree: a digit misread in one becomes unreadable, never a wrong page.
+        with patch('opticalbook.indicator.tesseract',return_value=('tesseract','')),patch('opticalbook.indicator.run',side_effect=[b'Page 63/94',b'Page 68/94']):
+            self.assertEqual(read_indicator(frame,config),{'text':'Page 63/94 | Page 68/94','page':None,'total':None})
+
+    def test_indicator_preparation_removes_lighting_bands(self):
+        numpy=__import__('numpy')
+        crop=Image.new('L',(240,60),255);ImageDraw.Draw(crop).text((20,25),'12/34',fill=90)
+        shade=numpy.tile(.72+.28*numpy.cos(numpy.arange(240)/12),(60,1))  # smooth dark/light lighting bands
+        crop=Image.fromarray((numpy.asarray(crop,float)*shade).astype('uint8'))
+        sent=numpy.asarray(prepare(crop))
+        self.assertEqual(set(numpy.unique(sent)),{0,255})
+        border=96//3;inner=sent[border:-border,border:-border]
+        self.assertGreater((inner[:20]==255).mean(),.99)  # banded background above the text is white
+        self.assertGreater((inner==0).sum(),100)  # text survives
 
     def test_unlogged_image_is_not_overwritten(self):
         (self.folder/'pages').mkdir()
@@ -303,16 +318,34 @@ class WorkflowTests(unittest.TestCase):
 
     def test_wrong_foreground_app_prevents_gesture(self):
         phone=Phone.__new__(Phone)
-        phone.config={**defaults()['capture'],'package':'com.reader.app'}
+        phone.config,phone.package=defaults()['capture'],'com.reader.app'
         calls=[]
         def adb(*args): calls.append(args);return 'mCurrentFocus=Window{abc u0 com.other.app/.Main}'
         phone.adb=adb
-        with self.assertRaisesRegex(RuntimeError,'not foreground'):phone.turn()
+        with self.assertRaisesRegex(RuntimeError,'com.other.app is in the foreground'):phone.turn()
         self.assertFalse(any('input' in args for args in calls))
+
+    def test_reader_is_locked_in_from_first_focused_app(self):
+        self.assertIsNone(focused('mCurrentFocus=null'))
+        self.assertIsNone(focused('mCurrentFocus=Window{a u0 PopupWindow:1}'))
+        self.assertIsNone(focused('mCurrentFocus=Window{a u0 com.a.x/.M}\nmCurrentFocus=Window{b u0 com.b.y/.M}'))
+        phone=Phone({**defaults()['capture'],'serial':'X'})
+        state=['  mCurrentFocus=Window{bc18b66 u0 com.reader.app/com.reader.app.MainActivity}']
+        calls=[]
+        def adb(*args):
+            calls.append(args)
+            return state[0] if args[1]=='dumpsys' else 'Physical size: 1080x2340'
+        phone.adb=adb
+        phone.turn()
+        self.assertEqual(phone.package,'com.reader.app')
+        state[0]='mCurrentFocus=Window{d u0 com.android.systemui/.NotificationShade}'
+        with self.assertRaisesRegex(RuntimeError,'instead of the reader com.reader.app'):phone.turn()
+        self.assertEqual(sum('input' in args for args in calls),1)
+        with self.assertRaises(ValueError):Phone({**defaults()['capture'],'serial':'X','package':'not a package'})
 
     def test_tap_uses_current_screen_size_and_normalized_coordinates(self):
         phone=Phone.__new__(Phone)
-        phone.config={**defaults()['capture'],'package':'com.reader.app','gesture':{'kind':'tap','end':[1,.5]}}
+        phone.config,phone.package={**defaults()['capture'],'gesture':{'kind':'tap','end':[1,.5]}},None
         calls=[]
         def adb(*args):
             calls.append(args)

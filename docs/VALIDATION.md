@@ -15,7 +15,7 @@ Current result: **40 tests passed**.
 They cover expected counter progression, exactly one turn, skipped pages, page
 changes during photographs, duplicate and blur gates, stop, resume and frozen
 settings, manual capture without phone actions, orphan preservation, manifest
-checksum/path validation, counter scoping/ambiguity, wrong-foreground rejection,
+checksum/path validation, counter scoping/ambiguity, wrong-foreground rejection and reader lock-in,
 tap coordinates, perspective validation, screen/gesture calibration mapping,
 optical page-indicator counter sequencing and mismatch refusal, indicator format
 parsing (label misreads, glued numbers, ambiguity), preview rotation point mapping,
@@ -52,6 +52,17 @@ These open the actual Tkinter window for 30 seconds with generated sample data,
 test review save and a background-job completion, and record widget dimensions in
 `.test-work/ui-state.json`. The Capture and Book generation tabs were visually
 inspected at 1220×900. Neither test opens a webcam or calls ADB.
+
+## Physical camera and phone check (2026-10-17)
+
+With a 1080p USB webcam over a Samsung phone on Android 16 (reader rotated
+90°, low-contrast gray `Сторінка N / 949` counter, visible lighting bands), the
+optical indicator was compared with the ADB counter over 30 ADB page turns
+(forward and back), three frames per page: 92 of 93 reads matched, none were wrong,
+and one was refused as unreadable (the two scales disagreed). The previous
+preprocessing read 0 of 63 such frames. ADB reader detection without a configured
+package and the Android 16 `dumpsys window` focus format were verified on the
+same phone.
 
 ## What remains unverified
 

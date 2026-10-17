@@ -16,7 +16,7 @@ from .capture import capture
 from .common import defaults, load_project, read_json, write_json, inside, fingerprint
 from .cameras import cameras
 from .imaging import Camera, PEAKING, REGIONS, exposure_raw, exposure_seconds, from_screen, gesture_from, parse_shutter, peaking, quad, rectify, rotate_point, sharpness, shutter_text, to_screen
-from .indicator import read_indicator
+from .indicator import prepare, read_indicator
 
 # Preview rotation in clockwise quarter turns -> PIL transpose (PIL's ROTATE_* turn counter-clockwise).
 TURNS = {1: Image.Transpose.ROTATE_270, 2: Image.Transpose.ROTATE_180, 3: Image.Transpose.ROTATE_90}
@@ -39,6 +39,10 @@ CALIBRATION = {
     'Phone screen': ('screen_corners', '#f0b44c', 'Click the whole lit phone screen: top-left → top-right → bottom-right → bottom-left. Aligns taps and swipes with the photo.'),
     'Page indicator': ('indicator_corners', '#6fa8ff', 'Click around the page indicator (e.g. 12 / 345): top-left → top-right → bottom-right → bottom-left.'),
     'Next-page gesture': ('gesture', '#ff6b8a', 'Click where the next-page tap lands, or the swipe start then its end, inside the marked screen.')}
+PHONE_MODES = {
+    'verified': 'Reads the counter from the reader\'s accessibility text over ADB before and after every turn. The regex needs two groups: page and total.',
+    'optical': 'Reads the calibrated page indicator from the camera image (Scan tab settings); ADB only sends the gestures.',
+    'manual': 'Saves one photo per click and never sends ADB input; turn the page yourself.'}
 
 
 class App:
@@ -64,6 +68,8 @@ class App:
         self.dragging = None
         self.preview_transform = None
         self.preview_key = None
+        # Indicator OCR view: inset key, last live reading, and throttling of its background OCR.
+        self.indicator_key, self.indicator_reading, self.indicator_busy, self.indicator_next = None, '', False, 0
         self.entry = None
         self.review_initial = None
         self.photo_refs = {}
@@ -132,6 +138,13 @@ class App:
             self.camera_hints[mode].configure(text=(text+now(mode, value)).strip())
         self.camera_hints['brightness'].configure(text=CAMERA_HINTS['brightness']['']+now('brightness'))
 
+    def show_phone_fields(self, *_):
+        """Counter regex only for verified mode; swipe start and duration only for swipes."""
+        mode = self.variables['capture.counter_mode'].get()
+        for widget in self.regex_widgets: widget.grid() if mode == 'verified' else widget.grid_remove()
+        for widget in self.swipe_widgets: widget.grid() if self.variables['gesture.kind'].get() == 'swipe' else widget.grid_remove()
+        self.mode_hint.configure(text=PHONE_MODES.get(mode,''))
+
     def button(self, parent, text, action):
         widget = ttk.Button(parent, text=text, command=lambda: self.safe(action))
         widget.pack(side='left', padx=3, pady=3)
@@ -172,20 +185,36 @@ class App:
         self.variables['camera.backend'].trace_add('write', self.show_camera_hints)
         self.reported = None
         ttk.Label(camera, text='Focus, exposure, white balance and brightness apply live with Start preview / apply. Source, backend, size, FPS and FourCC need Close preview, then Start preview. Backend auto = DirectShow on Windows. Open Camera to pick a device; an index, path or URL can also be typed.', wraplength=300).grid(row=row+2,column=0,columnspan=2,sticky='w',pady=10)
-        self.field(phone, 'ADB executable', 'capture.adb', 0, width=20)
-        self.serial_widget = self.field(phone, 'Device serial', 'capture.serial', 1, choices=[], width=20)
-        ttk.Button(phone,text='Refresh devices',command=lambda:self.safe(self.refresh_devices)).grid(row=2,column=1,sticky='ew')
-        self.field(phone, 'Reader package', 'capture.package', 3, width=20)
-        self.field(phone, 'Counter mode', 'capture.counter_mode', 4, ['verified','optical','manual'], 20)
-        self.field(phone, 'Counter regex', 'capture.counter_regex', 5, width=20)
-        self.field(phone, 'Next-page gesture', 'gesture.kind', 6, ['swipe','tap'], 20)
-        for row, (label,key) in enumerate([('Start x (0–1)','sx'),('Start y (0–1)','sy'),('End / tap x (0–1)','ex'),('End / tap y (0–1)','ey'),('Swipe duration ms','duration_ms')],7):
-            self.field(phone,label,'gesture.'+key,row,width=20)
+        device, counter, gesture = (ttk.LabelFrame(phone,text=title,padding=6) for title in ('Device','Page counter','Next-page gesture'))
+        for frame in (device, counter, gesture): frame.pack(fill='x',pady=(0,6))
+        self.field(device, 'ADB executable', 'capture.adb', 0, width=20)
+        self.serial_widget = self.field(device, 'Device serial', 'capture.serial', 1, choices=[], width=20)
+        ttk.Button(device,text='↻',width=3,command=lambda:self.safe(self.refresh_devices)).grid(row=1,column=2,padx=(3,0))
+        ttk.Label(device,text='Open the reader on the phone; the app in front at the first ADB read or gesture is treated as the reader, and input stops if another app takes over.',wraplength=300,foreground='gray35').grid(row=2,column=0,columnspan=3,sticky='w',pady=(4,0))
+        self.field(counter, 'Mode', 'capture.counter_mode', 0, ['verified','optical','manual'], 20).state(['readonly'])
+        self.field(counter, 'Counter regex', 'capture.counter_regex', 1, width=20)
+        self.regex_widgets = counter.grid_slaves(row=1)
+        self.mode_hint = ttk.Label(counter,wraplength=300,foreground='gray35')
+        self.mode_hint.grid(row=2,column=0,columnspan=2,sticky='w',pady=(4,0))
+        self.field(gesture, 'Kind', 'gesture.kind', 0, ['swipe','tap'], 20).state(['readonly'])
+        self.swipe_widgets = []
+        for row, (label,key) in enumerate([('Start x / y','s'),('End / tap x / y','e'),('Duration ms','duration_ms')],1):
+            if key == 'duration_ms': self.field(gesture,label,'gesture.'+key,row,width=20)
+            else:
+                ttk.Label(gesture,text=label).grid(row=row,column=0,sticky='w',pady=3,padx=(0,7))
+                pair = ttk.Frame(gesture)
+                pair.grid(row=row,column=1,sticky='w',pady=3)
+                for axis in 'xy':
+                    self.variables[f'gesture.{key}{axis}'] = tk.StringVar()
+                    ttk.Entry(pair,textvariable=self.variables[f'gesture.{key}{axis}'],width=8).pack(side='left',padx=(0,4))
+            if key != 'e': self.swipe_widgets += gesture.grid_slaves(row=row)
+        ttk.Label(gesture,text='Screen fractions, 0–1 from the top-left. Or place it on the preview: Calibrate → Next-page gesture.',wraplength=300,foreground='gray35').grid(row=4,column=0,columnspan=2,sticky='w',pady=(4,0))
         actions = ttk.Frame(phone)
-        actions.grid(row=12,column=0,columnspan=2,sticky='w',pady=8)
+        actions.pack(fill='x')
         self.button(actions,'Read counter',self.read_counter)
         self.button(actions,'Test next page',self.test_turn)
-        ttk.Label(phone,text='Verified mode reads the counter over ADB. Optical mode reads the calibrated page indicator in the camera image with Tesseract; ADB still turns pages. Both stop on unreadable counters, gaps, layout changes, or the wrong foreground app. Manual mode saves one photo per click and sends no ADB input.',wraplength=325).grid(row=13,column=0,columnspan=2,sticky='w')
+        self.variables['capture.counter_mode'].trace_add('write',self.show_phone_fields)
+        self.variables['gesture.kind'].trace_add('write',self.show_phone_fields)
         self.start_var = tk.StringVar(value='1')
         self.count_var = tk.StringVar(value='3')
         for row, (label,var) in enumerate([('Start / next unsaved page',self.start_var),('Pages this run (sample: 3)',self.count_var)]):
@@ -233,6 +262,8 @@ class App:
         self.peaking_var, self.peaking_level = tk.BooleanVar(value=False), tk.StringVar(value='Mid')
         ttk.Checkbutton(actions,text='Focus peaking',variable=self.peaking_var).pack(side='left',padx=(12,3))
         ttk.Combobox(actions,textvariable=self.peaking_level,values=list(PEAKING),width=5,state='readonly').pack(side='left')
+        self.indicator_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(actions,text='Indicator OCR view',variable=self.indicator_var).pack(side='left',padx=(12,3))
         actions = ttk.Frame(right)
         actions.pack(fill='x')
         self.button(actions,'Capture pages',self.start_capture)
@@ -335,7 +366,8 @@ class App:
             var.set('' if value is None else str(value))
         self.dictionary_var.set(self.config['book'].get('dictionary_hyphens',False))
         self.show_camera_hints()
-        self.regions = {key: copy.deepcopy(self.config['capture'].get(key,[])) for key in REGIONS}
+        self.show_phone_fields()
+        self.regions ={key: copy.deepcopy(self.config['capture'].get(key,[])) for key in REGIONS}
         self.marking, self.marked, self.backup, self.dragging = None, [], None, None
         self.rotation = int(self.config['capture'].get('preview_rotation') or 0)//90 % 4
         self.show_rotation()
@@ -739,7 +771,11 @@ class App:
         config = self.collect_settings()['capture']
         camera = self.indicator_camera(config)
         def job():
-            found = ['ADB counter: '+str(android.Phone(config).page())] if config['counter_mode']=='verified' or not camera else []
+            found = []
+            if config['counter_mode']=='verified' or not camera:
+                phone = android.Phone(config)
+                page, total = phone.page()
+                found.append(f'ADB counter: {page}/{total} in {phone.package}')
             if camera: found.append(self.indicator_text(config,camera.frame(after=camera.sequence)[1]))
             return ' · '.join(found)
         self.work(job)
@@ -757,7 +793,7 @@ class App:
             phone.turn()
             if config['counter_mode']=='optical': time.sleep(float(config['settle_seconds']))
             after=page()
-            return f'Gesture test: {before} → {after}. Check that exactly one page advanced.'
+            return f'Gesture test in {phone.package}: {before} → {after}. Check that exactly one page advanced.'
         self.work(job)
 
     def start_capture(self):
@@ -885,6 +921,7 @@ class App:
                 kind,value=self.events.get_nowait()
                 if kind=='log': self.log(value)
                 elif kind=='camera': self.camera=value
+                elif kind=='indicator': self.indicator_reading,self.indicator_busy,self.indicator_next=value,False,time.monotonic()+.5
                 elif kind=='devices':
                     self.serial_widget.configure(values=value)
                     if len(value)==1: self.variables['capture.serial'].set(value[0])
@@ -939,6 +976,8 @@ class App:
                     # Peaking works at full camera resolution, so resize (and peak) first, then rotate the small view.
                     resized=peaking(image,unrotated,level) if level else image.resize(unrotated)
                     self.photo_refs['preview']=ImageTk.PhotoImage(resized.transpose(TURNS[turns]) if turns else resized)
+                if self.indicator_var.get(): self.update_indicator_view(image,sequence)
+                else: self.photo_refs.pop('indicator',None);self.indicator_key=None
                 self.preview_transform=((width-size[0])/2,(height-size[1])/2,scale,image.width,image.height,turns)
                 self.redraw()
         self.root.after(100,self.tick)
@@ -948,6 +987,43 @@ class App:
         self.preview.delete('all')
         self.preview.create_image(*self.preview_transform[:2],anchor='nw',image=self.photo_refs['preview'])
         self.draw_calibration()
+        if self.indicator_var.get():
+            colour,bottom = CALIBRATION['Page indicator'][1],8
+            if 'indicator' in self.photo_refs:
+                inset = self.photo_refs['indicator']
+                self.preview.create_rectangle(7,7,inset.width()+9,inset.height()+9,outline=colour,width=2)
+                self.preview.create_image(8,8,anchor='nw',image=inset)
+                bottom += inset.height()+6
+            self.overlay_text(8,bottom,self.indicator_reading or 'Reading…',colour,'nw')
+
+    def update_indicator_view(self,image,sequence):
+        """View-only aid like focus peaking: the indicator crop exactly as Tesseract receives it, plus a live reading.
+        OCR runs on its own throttled thread (not a job), so it never blocks the UI or other work."""
+        corners = self.regions.get('indicator_corners') or []
+        if len(corners)!=4 or self.marking=='indicator_corners':
+            self.photo_refs.pop('indicator',None);self.indicator_key=None
+            self.indicator_reading='Calibrate the page indicator to see what OCR reads.'
+            return
+        key = (sequence,str(corners))
+        if self.indicator_key!=key:
+            self.indicator_key = key
+            try: prepared = prepare(rectify(image,corners,REGIONS['indicator_corners'][1]))
+            except ValueError as error:
+                self.photo_refs.pop('indicator',None);self.indicator_reading=str(error)
+                return
+            width = min(360,prepared.width)
+            self.photo_refs['indicator'] = ImageTk.PhotoImage(prepared.resize((width,max(1,round(prepared.height*width/prepared.width)))))
+        if self.indicator_busy or time.monotonic()<self.indicator_next: return
+        config = dict(self.config['capture'],indicator_corners=copy.deepcopy(corners),
+                      **{name: self.variables['capture.'+name].get().strip() for name in ('tesseract','tessdata','indicator_language','indicator_format')})
+        self.indicator_busy = True
+        def target():
+            try:
+                reading = read_indicator(image,config)
+                text = f'OCR {reading["text"]!r} → '+(f'{reading["page"]}/{reading["total"]}' if reading['page'] else 'unreadable')
+            except Exception as error: text = 'Indicator OCR failed: '+str(error)
+            self.events.put(('indicator',text))
+        threading.Thread(target=target,daemon=True).start()
 
     def overlay_text(self,x,y,text,colour,anchor):
         """Label on a dark box so it stays readable over white pages, dark screens and busy backgrounds."""

@@ -60,7 +60,7 @@ settings fingerprint has a different contract.
 | Firm stand, stable focus and screen brightness | Strongly recommended | Not required |
 | ADB / Android Platform Tools | For verified counter capture and page gestures | Not required |
 | Authorized Android device with USB debugging | For ADB mode | Not required |
-| Reader package name and accessible page counter | For verified ADB mode | Not required |
+| Accessible page counter in the reader | For verified ADB mode | Not required |
 | Tesseract 5.x executable (installed or bundled) | For optical counter / page indicator checks | Required for OCR |
 | Tesseract traineddata models | Not required | One per selected OCR language |
 | wordfreq | Not required | Optional dictionary-based wrap-hyphen decisions |
@@ -100,7 +100,9 @@ photo (its crop may be as small as 10 px). Neither changes saved page images, so
 neither is part of the frozen capture fingerprint.
 
 `opticalbook/android.py` uses an explicit ADB serial for every device command. It
-checks the configured reader's foreground package before input. Page counters come
+checks the focused package (`dumpsys window`, `mCurrentFocus`) before input: the
+first focused app is locked in as the reader for that session (or an optional
+`package` pin), and any other focused app stops. Page counters come
 from fresh `uiautomator dump` XML, scoped to that package; unique remote filenames
 prevent stale XML reuse. The counter regex must contain exactly two groups: current
 page and total. Missing or ambiguous counters cause a stop.
@@ -130,7 +132,12 @@ read as that page and total, in every mode; otherwise nothing is saved and
 entry (`indicator`: OCR text, page, total), and a manual page with a matching
 indicator is recorded as `counter_verified`. Indicator OCR is capture-side: its own
 `tesseract`/`tessdata`/`indicator_language` settings in the capture section, single-line
-mode, an upscaled and dark-theme-inverted crop sent on stdin. `indicator_format`
+mode, crop sent on stdin. The crop is dark-theme-inverted, upscaled, divided by its
+local background (a closing about 0.2 line heights wide) and binarized: photographed
+screens carry lighting bands and moiré that defeat Tesseract's global threshold (on a
+real low-contrast `Сторінка 61 / 949` counter it read nothing until this was added).
+It is read at two line heights; unless both give the same page and total, the frame
+is unreadable, so one misread digit cannot become a wrong page. `indicator_format`
 describes the counter as a template such as `Page {page}/{total}`. Tesseract output
 is restricted to digits plus the template's own characters; the template becomes a
 searched regex in which each label letter also matches its OCR look-alikes (digits,

@@ -54,6 +54,13 @@ edges, High also nearly-sharp ones. Peaking only changes the preview, never save
 absolute contrast test, so a very dark or low-contrast image may show little even when
 sharp — check with **Test crop**.
 
+Once the page indicator is calibrated, tick **Indicator OCR view** to see, in the
+preview's top-left corner, the indicator exactly as Tesseract receives it (black on
+white after background flattening and thresholding) and a live reading about twice a
+second, using the Scan tab's indicator settings. Broken-up digits mean too small or
+soft; black blobs mean glare or a lighting-band edge; a clean image that still misreads
+points at the OCR model or indicator format. Like peaking, it only changes the preview.
+
 Pick a target in **Calibrate**, select **Mark** and click its four corners: top-left,
 top-right, bottom-right, bottom-left as seen in book reading order, even if the camera
 is mounted sideways. Right-click cancels and keeps the previous marks; **Clear**
@@ -87,7 +94,10 @@ The sharpness threshold is a rejection aid; calibrate it against actual sample t
 
 Enable Android developer options and USB debugging, authorize this PC on the phone,
 and choose the executable and explicit device serial. **Refresh devices** lists
-authorized devices. Fill the reader package, for example `com.readeat.app`.
+authorized devices (the ↻ button next to the serial). No package name is needed:
+open the reader on the phone, and the app in front at the first ADB read or gesture
+is treated as the reader. Input stops if another app (notification shade, a popup,
+the launcher) takes focus later. `"package"` in `project.json` can optionally pin it.
 
 Verified mode needs an accessible page counter. The default regex recognizes
 `Page 1 / 265`, `Сторінка 1 / 265`, and `1 / 265`. Its two groups must be page and
@@ -125,7 +135,7 @@ unreadable or ambiguous indicator stops capture; it is never guessed.
 
 The indicator Tesseract (default: the bundled copy, else PATH), optional tessdata folder
 and model are on the Scan tab too; `eng` suffices for Latin labels, use e.g.
-`ukr+eng` for Cyrillic ones. Optical mode still needs ADB, the serial and package to
+`ukr+eng` for Cyrillic ones. Optical mode still needs ADB and the serial to
 turn pages. The indicator must stay visible on every page. **Read counter** and
 **Test next page** use the camera in this mode; **Test crop** also shows what
 Tesseract reads.
@@ -160,7 +170,7 @@ adjusted to recover a stopped run.
 
 ```sh
 python -m opticalbook init projects/my-book
-# Configure project.json: camera, explicit serial/package, gesture and counter.
+# Configure project.json: camera, explicit serial, gesture and counter.
 python -m opticalbook photo --project projects/my-book --output projects/my-book/test.png
 python -m opticalbook calibrate --project projects/my-book --photo projects/my-book/test.png --corners 0 0 1000 0 1000 1600 0 1600
 python -m opticalbook calibrate --project projects/my-book --photo projects/my-book/test.png --screen 0 0 1080 0 1080 1700 0 1700 --indicator 450 1640 630 1640 630 1690 450 1690 --swipe 900 850 200 850
