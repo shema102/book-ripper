@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 import queue
+import re
 import sys
 import threading
 import time
@@ -73,6 +74,7 @@ class App:
         # Indicator OCR view: inset key, last live reading, and throttling of its background OCR.
         self.indicator_key, self.indicator_reading, self.indicator_busy, self.indicator_next = None, '', False, 0
         self.entry = None
+        self.figures = []  # Review: figure boxes of the selected page in source pixels; [figure N] in the text is figures[N-1]
         self.review_initial = None
         self.photo_refs = {}
         self.status = tk.StringVar(value='Create or open a project. No camera or phone is used until you choose an action.')
@@ -328,6 +330,8 @@ class App:
             self.field(right,label,'book.'+key,row)
         self.dictionary_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(self.book_tab,text='Dictionary-assisted wrap hyphens (requires optional wordfreq)',variable=self.dictionary_var).pack(anchor='w')
+        self.figures_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.book_tab,text='Detect illustrations: crop them out as figures and drop OCR noise read from them',variable=self.figures_var).pack(anchor='w')
         actions = ttk.Frame(self.book_tab)
         actions.pack(fill='x',pady=6)
         self.button(actions,'Check Tesseract / models',self.check_tesseract)
@@ -358,7 +362,8 @@ class App:
         source_actions = ttk.Frame(editing)
         source_actions.pack(fill='x')
         self.button(source_actions,'View source at full resolution',self.show_source)
-        ttk.Label(editing,text='Blank line = paragraph. Enter = hard line break. Display wrapping is automatic.').pack(anchor='w')
+        self.button(source_actions,'Edit figures',self.edit_figures)
+        ttk.Label(editing,text='Blank line = paragraph. Enter = hard line break. Display wrapping is automatic. A [figure N] paragraph places figure N.').pack(anchor='w')
         editor_frame = ttk.Frame(editing)
         editor_frame.pack(fill='both',expand=True)
         self.editor = tk.Text(editor_frame,wrap='word',height=8,undo=True,font=('TkDefaultFont',11))
@@ -412,6 +417,7 @@ class App:
             else: value = self.config[group][name]
             var.set('' if value is None else str(value))
         self.dictionary_var.set(self.config['book'].get('dictionary_hyphens',False))
+        self.figures_var.set(self.config['book'].get('figures',True))
         self.show_camera_hints()
         self.show_phone_fields()
         self.regions ={key: copy.deepcopy(self.config['capture'].get(key,[])) for key in REGIONS}
@@ -454,6 +460,7 @@ class App:
         result['capture'].update(copy.deepcopy(self.regions))
         result['capture']['preview_rotation'] = self.rotation*90
         result['book']['dictionary_hyphens'] = self.dictionary_var.get()
+        result['book']['figures'] = self.figures_var.get()
         for key in ('width','height','fps'):
             if result['capture']['camera'][key] <= 0: raise ValueError(f'Camera {key} must be positive.')
         for key in ('settle_seconds','minimum_sharpness','minimum_difference'):
@@ -488,7 +495,7 @@ class App:
         self.close_camera()
         self.folder = Path(folder).resolve()
         self.config = load_project(self.folder)
-        self.entry, self.review_initial = None, None
+        self.entry, self.review_initial, self.figures = None, None, []
         self.path.set(str(self.folder))
         self.fill_settings()
         self.editor.delete('1.0','end')
@@ -805,19 +812,19 @@ class App:
         _,image = self.camera.frame()
         crop = rectify(image,self.regions['corners'],REGIONS['corners'][1])
         def job():
-            values,lines = generation.ocr_test(crop,config)
-            self.events.put(('ocr_test',(crop,values,lines,config)))
-            return f'OCR test: {len(values)} paragraph(s), {sum(len(line["words"]) for line in lines)} words.'
+            values,lines,figures = generation.ocr_test(crop,config)
+            self.events.put(('ocr_test',(crop,values,lines,figures,config)))
+            return f'OCR test: {len(values)} paragraph(s), {sum(len(line["words"]) for line in lines)} words, {len(figures)} figure(s).'
         self.work(job)
 
-    def ocr_window(self,crop,values,lines,config):
+    def ocr_window(self,crop,values,lines,figures,config):
         window = tk.Toplevel(self.root)
         window.title('OCR test — text as the book will get it')
         window.geometry('1150x780')
         words = [word for line in lines for word in line['words']]
         mean = sum(word['confidence'] for word in words)/len(words) if words else 0
         ttk.Label(window,padding=(8,6),wraplength=1100,text=f'{config["ocr_language"]}, PSM {config["psm"]}, scale {config["scale"]} · '
-                  f'{len(values)} paragraph(s), {len(words)} words, mean confidence {mean:.0f} · yellow: confidence below {LOW_CONFIDENCE}; blue: Latin look-alike re-read without eng ({sum("ocr_text" in word for word in words)}). '
+                  f'{len(values)} paragraph(s), {len(words)} words, mean confidence {mean:.0f} · yellow: confidence below {LOW_CONFIDENCE}; blue: Latin look-alike re-read without eng ({sum("ocr_text" in word for word in words)}); orange: detected figures ({len(figures)}). '
                   "Blank line = paragraph break, as Review and the EPUB get it; wrapping inside a paragraph is only this window's.").pack(fill='x')
         panes = ttk.Panedwindow(window,orient='horizontal')
         panes.pack(fill='both',expand=True,padx=8,pady=(0,8))
@@ -827,6 +834,11 @@ class App:
             scale = min(event.width/crop.width,event.height/crop.height)
             picture.photo = ImageTk.PhotoImage(crop.resize((max(1,round(crop.width*scale)),max(1,round(crop.height*scale))),Image.Resampling.LANCZOS))
             picture.delete('all');picture.create_image(event.width/2,event.height/2,image=picture.photo)
+            x,y = (event.width-crop.width*scale)/2,(event.height-crop.height*scale)/2
+            for number,figure in enumerate(figures,1):
+                left,top,right,bottom = figure['box']
+                picture.create_rectangle(x+left*scale,y+top*scale,x+right*scale,y+bottom*scale,outline='#ff9f43',width=2)
+                picture.create_text(x+left*scale+3,y+top*scale+2,anchor='nw',text=str(number),fill='#ff9f43',font=('TkDefaultFont',9,'bold'))
         picture.bind('<Configure>',fit)
         frame = ttk.Frame(panes)
         panes.add(frame,weight=3)
@@ -834,7 +846,7 @@ class App:
         scroll = ttk.Scrollbar(frame,command=text.yview)
         scroll.pack(side='right',fill='y');text.pack(side='left',fill='both',expand=True)
         text.configure(yscrollcommand=scroll.set)
-        content = '\n\n'.join(value['text'] for value in values) or '(no text recognized)'
+        content = generation.review_text({'paragraphs':values,'figures':figures}) or '(no text recognized)'
         text.insert('1.0',content)
         text.tag_configure('low',background='#ffe08a')
         text.tag_configure('fixed',background='#bfe0ff')
@@ -954,7 +966,7 @@ class App:
         if self.entries: self.start_var.set(str(self.entries[-1]['page']+1))
 
     def review_state(self):
-        return (self.editor.get('1.0','end-1c'),self.chapter_var.get(),self.image_page_var.get(),self.continuation_var.get())
+        return (self.editor.get('1.0','end-1c'),self.chapter_var.get(),self.image_page_var.get(),self.continuation_var.get(),tuple(map(tuple,self.figures)))
 
     def confirm_review(self):
         if self.entry and self.review_initial is not None and self.review_state()!=self.review_initial:
@@ -978,8 +990,9 @@ class App:
             self.log(error)
             record={'paragraphs':[]}
         self.editor.delete('1.0','end')
-        self.editor.insert('1.0','\n\n'.join(value['text'] for value in record['paragraphs']))
+        self.editor.insert('1.0',generation.review_text(record))
         self.editor.edit_reset()
+        self.figures=[list(figure['box']) for figure in record.get('figures',[])]
         self.chapter_var.set(record.get('chapter',''))
         self.image_page_var.set(record.get('image_only',False))
         self.continuation_var.set({True:'Yes',False:'No',None:'Auto'}[record.get('continuation')])
@@ -991,14 +1004,98 @@ class App:
         if not self.entry: return
         with Image.open(inside(self.folder,self.entry['image'])) as image:
             image=image.convert('RGB')
+            width=image.width
             image.thumbnail((max(10,self.review_canvas.winfo_width()),max(10,self.review_canvas.winfo_height())))
             self.photo_refs['review']=ImageTk.PhotoImage(image)
-        self.review_canvas.create_image(self.review_canvas.winfo_width()/2,self.review_canvas.winfo_height()/2,image=self.photo_refs['review'])
+        cx,cy=self.review_canvas.winfo_width()/2,self.review_canvas.winfo_height()/2
+        self.review_canvas.create_image(cx,cy,image=self.photo_refs['review'])
+        scale,x,y=image.width/width,cx-image.width/2,cy-image.height/2
+        for number,(left,top,right,bottom) in enumerate(self.figures,1):
+            self.review_canvas.create_rectangle(x+left*scale,y+top*scale,x+right*scale,y+bottom*scale,outline='#ff9f43',width=2)
+            self.review_canvas.create_text(x+left*scale+3,y+top*scale+2,anchor='nw',text=str(number),fill='#ff9f43',font=('TkDefaultFont',9,'bold'))
+
+    def add_figure(self,box):
+        """New figure box; its marker goes at the end of the text for the reviewer to move."""
+        self.figures.append(box)
+        self.editor.insert('end',('\n\n' if self.editor.get('1.0','end-1c').strip() else '')+f'[figure {len(self.figures)}]')
+        self.editor.see('end')
+        self.draw_review_image()
+
+    def remove_figure(self,number):
+        """Delete figure N and its marker; later figures move down one number."""
+        del self.figures[number-1]
+        def renumber(value):
+            match=generation.FIGURE.fullmatch(value.strip())
+            if not match: return value
+            other=int(match.group(1))
+            return None if other==number else f'[figure {other-(other>number)}]'
+        values=[renumber(value) for value in re.split(r'\n\s*\n',self.editor.get('1.0','end-1c').strip()) if value.strip()]
+        self.editor.delete('1.0','end')
+        self.editor.insert('1.0','\n\n'.join(value for value in values if value is not None))
+        self.draw_review_image()
+
+    def edit_figures(self):
+        """Full page with its figure boxes: drag to add one, right-click one to delete it. Saved with the page review."""
+        if not self.entry: raise ValueError('Select a page first.')
+        entry=self.entry
+        with Image.open(inside(self.folder,entry['image'])) as image: page=image.convert('RGB')
+        window=tk.Toplevel(self.root)
+        window.title(f'Figures on page {entry["page"]}')
+        window.geometry(f'{min(900,page.width+20)}x{min(880,page.height+80)}')
+        ttk.Label(window,padding=(8,6),wraplength=860,text='Drag a box around an illustration to add it as a figure; its [figure N] marker is added at the end of the '
+                  'text, so move it to where the figure belongs. Right-click a box to delete it and its marker. Save page review keeps the changes.').pack(fill='x')
+        canvas=tk.Canvas(window,background='#273442',highlightthickness=0,cursor='crosshair')
+        canvas.pack(fill='both',expand=True)
+        view={'scale':1,'x':0,'y':0,'start':None}
+        def current():
+            if self.entry is entry: return True
+            window.destroy()
+            return False
+        def draw(event=None):
+            if not current(): return
+            width,height=max(10,canvas.winfo_width()),max(10,canvas.winfo_height())
+            scale=min(width/page.width,height/page.height)
+            view.update(scale=scale,x=(width-page.width*scale)/2,y=(height-page.height*scale)/2)
+            if event is not None or 'photo' not in view:
+                view['photo']=ImageTk.PhotoImage(page.resize((max(1,round(page.width*scale)),max(1,round(page.height*scale))),Image.Resampling.LANCZOS))
+            canvas.delete('all')
+            canvas.create_image(view['x'],view['y'],anchor='nw',image=view['photo'])
+            for number,box in enumerate(self.figures,1):
+                left,top,right,bottom=(view['x']+box[0]*scale,view['y']+box[1]*scale,view['x']+box[2]*scale,view['y']+box[3]*scale)
+                canvas.create_rectangle(left,top,right,bottom,outline='#ff9f43',width=2)
+                canvas.create_text(left+4,top+3,anchor='nw',text=f'figure {number}',fill='#ff9f43',font=('TkDefaultFont',10,'bold'))
+        def source(event):
+            return (min(page.width,max(0,(event.x-view['x'])/view['scale'])),min(page.height,max(0,(event.y-view['y'])/view['scale'])))
+        def press(event):
+            if current(): view['start']=source(event)
+        def motion(event):
+            if not view['start']: return
+            canvas.delete('rubber')
+            x,y=view['start']
+            canvas.create_rectangle(view['x']+x*view['scale'],view['y']+y*view['scale'],event.x,event.y,outline='#ffd166',dash=(4,2),tags='rubber')
+        def release(event):
+            start,view['start']=view['start'],None
+            if not start or not current(): return
+            (x0,y0),(x1,y1)=start,source(event)
+            box=[round(min(x0,x1)),round(min(y0,y1)),round(max(x0,x1)),round(max(y0,y1))]
+            if box[2]-box[0]>=8 and box[3]-box[1]>=8: self.add_figure(box)
+            draw()
+        def delete(event):
+            if not current(): return
+            x,y=source(event)
+            hits=[number for number,box in enumerate(self.figures,1) if box[0]<=x<=box[2] and box[1]<=y<=box[3]]
+            if hits: self.remove_figure(hits[-1])
+            draw()
+        canvas.bind('<Configure>',draw)
+        canvas.bind('<Button-1>',press)
+        canvas.bind('<B1-Motion>',motion)
+        canvas.bind('<ButtonRelease-1>',release)
+        canvas.bind('<Button-3>',delete)
 
     def save_page_review(self):
         if not self.entry: raise ValueError('Select a page first.')
-        text,chapter,image_only,continuation=self.review_state()
-        generation.save_review(self.folder,self.entry,text,chapter,image_only,{'Auto':None,'Yes':True,'No':False}[continuation])
+        text,chapter,image_only,continuation,figures=self.review_state()
+        generation.save_review(self.folder,self.entry,text,chapter,image_only,{'Auto':None,'Yes':True,'No':False}[continuation],figures)
         self.review_initial=self.review_state()
         self.pages.set(str(self.entry['page']),'status','Reviewed')
         self.log(f'Saved review for page {self.entry["page"]}.')

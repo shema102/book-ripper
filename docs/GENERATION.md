@@ -67,6 +67,18 @@ Set **First paragraph continues previous page** to Yes/No to resolve page-bounda
 ambiguity, or leave Auto for conservative geometric inference. A chapter title
 starts a navigation section; remove any duplicate title from the body yourself.
 For maps, diagrams, decorative pages or failed OCR, choose **Keep page as image**.
+
+**Detect illustrations** (on by default) boxes pictures inside text pages during OCR:
+ink that recognized words do not explain, at least two text lines tall and wide, with
+no text beside it (so a drop cap is not a figure). OCR noise and labels inside a box
+leave the text. Boxes are drawn on the Review thumbnail, and the text shows a
+`[figure N]` paragraph where figure N goes; move that paragraph to change the
+position. **Edit figures** opens the page: drag a box to add a figure (its marker is
+appended to the text), right-click one to delete it and its marker. Each box needs
+exactly one marker; a page with only a figure needs no text. Export crops each figure
+from the source image between the paragraphs. A figure never splits a paragraph that
+continues across pages; it follows the joined paragraph. Changing the setting re-runs
+OCR. Detection is heuristic, so check pages flagged for review.
 Save the page review before moving on. The UI prompts about unsaved page edits.
 
 Automatic OCR/layout is not full proofreading. Check names, punctuation, dialogue,

@@ -127,7 +127,7 @@ def defaults():
             "gesture": {"kind": "swipe", "start": [.8, .55], "end": [.2, .55], "duration_ms": 300}},
         "book": {"title": "Untitled book", "author": "", "language": "uk",
                  "tesseract": "tesseract", "tessdata": "", "ocr_language": "ukr+eng",
-                 "psm": 3, "scale": 1.5, "dictionary_hyphens": False}
+                 "psm": 3, "scale": 1.5, "dictionary_hyphens": False, "figures": True}
     }
 
 

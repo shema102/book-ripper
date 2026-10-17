@@ -37,7 +37,14 @@ root.update()
 assert 'A page for interface' in app.editor.get('1.0','end')
 assert app.editor.winfo_width()>300 and app.editor.winfo_height()>50
 assert app.review_canvas.winfo_height()>=190
+app.edit_figures()
+root.update()
+app.add_figure([60,560,540,860]);app.add_figure([10,10,50,50])
+app.remove_figure(1)
+root.update()
+assert app.figures==[[10,10,50,50]] and app.editor.get('1.0','end-1c').endswith('starts here.\n\n[figure 1]'),app.editor.get('1.0','end-1c')
 app.save_page_review()
+assert read_json(project/'ocr/edits/00001.json')['figures']==[{'box':[10,10,50,50],'at':3}]
 app.work(lambda:'Background job and UI event queue verified.')
 def finish():
     assert not app.busy

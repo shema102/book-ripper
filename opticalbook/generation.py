@@ -16,9 +16,12 @@ from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 from PIL import Image, ImageOps
 from .capture import validate_manifest
 from .common import digest, fingerprint, inside, read_json, run, tesseract, write_json, locked
+from .figures import detect, place
 from .layout import paragraph_starts
 
-OCR_VERSION = "geometry-tsv-v3"  # v2: drop-cap lines stay one paragraph; v3: Latin look-alikes re-read, free hyphens are dashes
+OCR_VERSION = "geometry-tsv-v4"  # v2: drop-cap lines stay one paragraph; v3: Latin look-alikes re-read, free hyphens are dashes; v4: figures
+# A review paragraph that is only this marker places figure N of the page there.
+FIGURE = re.compile(r'\[figure (\d+)\]')
 
 
 def import_images(source, destination):
@@ -161,12 +164,19 @@ def ocr_page(image, config, command, tessdata):
     return raw, group_lines(words)
 
 
+def page_layout(image, lines, config):
+    """OCR lines -> (paragraphs, text lines, figures placed among the paragraphs). Lines inside a figure leave the text."""
+    boxes, lines = detect(image, lines) if config.get('figures', True) else ([], lines)
+    values = paragraphs(lines, image.width, config)
+    return values, lines, place(boxes, values)
+
+
 def ocr_test(image, config):
     """One-off OCR of an image with the book settings, exactly as recognize would do it; nothing is cached or written."""
     if not .5 <= float(config['scale']) <= 4 or int(config['psm']) not in range(14):
         raise ValueError('OCR scale must be 0.5–4 and PSM must be 0–13.')
     _, lines = ocr_page(image, config, *tesseract(config))
-    return paragraphs(lines, image.width, config), lines
+    return page_layout(image, lines, config)
 
 
 def tesseract_info(config):
@@ -192,6 +202,7 @@ def recognize(folder, config, stop=None, log=print):
     if not .5 <= scale <= 4 or int(config['psm']) not in range(14):
         raise ValueError('OCR scale must be 0.5–4 and PSM must be 0–13.')
     ocr_settings = {key: config[key] for key in ('tesseract','tessdata','ocr_language','psm','scale','dictionary_hyphens')}
+    ocr_settings['figures'] = config.get('figures', True)
     if config.get('dictionary_hyphens'):
         ocr_settings['language'] = config['language']
     model_directory = tessdata
@@ -217,19 +228,18 @@ def recognize(folder, config, stop=None, log=print):
                 log(f'OCR cached: page {number}.')
                 continue
         with Image.open(inside(folder, entry['image'])) as original:
-            width = original.width
             raw, lines = ocr_page(original, config, command, tessdata)
-        values = paragraphs(lines, width, config)
+            values, lines, figures = page_layout(original, lines, config)
         record = {'page': number, 'source_sha256': entry['sha256'], 'settings_sha256': settings,
-                  'engine': version, 'paragraphs': values, 'lines': lines,
+                  'engine': version, 'paragraphs': values, 'figures': figures, 'lines': lines,
                   'mean_confidence': statistics.mean(x['confidence'] for x in lines) if lines else None,
-                  'needs_review': not lines or any(x['confidence'] < 70 for x in lines)}
+                  'needs_review': bool(figures) or not lines or any(x['confidence'] < 70 for x in lines)}
         raw_path = folder / 'ocr' / 'raw' / f'{number:05d}.tsv'
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         raw_path.write_text(raw, encoding='utf-8')
         write_json(target, record)
         done += 1
-        log(f'OCR page {number}/{manifest["total"]}: {len(values)} paragraphs' + ('; REVIEW suggested.' if record['needs_review'] else '.'))
+        log(f'OCR page {number}/{manifest["total"]}: {len(values)} paragraphs' + (f', {len(figures)} figure(s)' if figures else '') + ('; REVIEW suggested.' if record['needs_review'] else '.'))
     return done
 
 
@@ -248,15 +258,48 @@ def page_record(folder, entry):
     return record
 
 
-def save_review(folder, entry, text, chapter='', image_only=False, continuation=None):
+def page_items(record):
+    """Paragraphs and figures in reading order: ('p', paragraph) or ('figure', (number, box))."""
+    items = [('p', value) for value in record.get('paragraphs', [])]
+    for number, figure in sorted(enumerate(record.get('figures', []), 1), key=lambda x: (-x[1]['at'], -x[0])):
+        items.insert(figure['at'], ('figure', (number, figure['box'])))
+    return items
+
+
+def review_text(record):
+    """Review editor text: paragraphs separated by blank lines, a [figure N] paragraph where figure N goes."""
+    return '\n\n'.join(value['text'] if kind == 'p' else f'[figure {value[0]}]' for kind, value in page_items(record))
+
+
+def save_review(folder, entry, text, chapter='', image_only=False, continuation=None, figures=()):
     # Tk's visual word wrapping inserts no newline. Explicit Enter presses
     # therefore remain hard line breaks; blank lines separate paragraphs.
     values = ['\n'.join(' '.join(line.split()) for line in value.splitlines())
               for value in re.split(r'\n\s*\n', text.strip()) if value.strip()]
-    if not values and not image_only:
+    boxes, (width, height) = [[round(v) for v in box] for box in figures], entry['size']
+    for number, (left, top, right, bottom) in enumerate(boxes, 1):
+        if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+            raise ValueError(f'Figure {number} lies outside the {width}×{height} page image.')
+    kept, placed = [], {}
+    for value in values:
+        match = FIGURE.fullmatch(value)
+        if match:
+            number = int(match.group(1))
+            if not 1 <= number <= len(boxes) or number in placed:
+                raise ValueError(f'[figure {number}] must name one of this page\'s {len(boxes)} figure(s), each once.')
+            placed[number] = {'box': boxes[number-1], 'at': len(kept)}
+        elif FIGURE.search(value):
+            raise ValueError('Put each [figure N] marker in a paragraph of its own, between blank lines.')
+        else:
+            kept.append(value)
+    missing = [str(number) for number in range(1, len(boxes)+1) if number not in placed]
+    if missing:
+        raise ValueError('No marker for figure ' + ', '.join(missing) + ': place [figure N] in the text or delete the figure.')
+    if not kept and not placed and not image_only:
         raise ValueError('Empty text needs an explicit image-page selection; no source page is silently dropped.')
     record = {'page': entry['page'], 'source_sha256': entry['sha256'], 'reviewed': True,
-              'paragraphs': [{'text': value, 'first_indent': True, 'last_line_full': False} for value in values],
+              'paragraphs': [{'text': value, 'first_indent': True, 'last_line_full': False} for value in kept],
+              'figures': [placed[number] for number in sorted(placed)],
               'chapter': chapter.strip(), 'image_only': bool(image_only), 'continuation': continuation}
     write_json(Path(folder) / 'ocr' / 'edits' / f'{entry["page"]:05d}.json', record)
     return record
@@ -277,7 +320,7 @@ def build_epub(folder, output, config, partial=False, image_only=False):
     sections = [{'title': 'Start', 'nodes': []}]
     assets, links, joins = [], [], []
     last = None
-    reviewed = 0
+    reviewed = figures = 0
     def body_text(text):
         return escape(text).replace('\n','<br/>')
     for entry in manifest['pages']:
@@ -296,20 +339,33 @@ def build_epub(folder, output, config, partial=False, image_only=False):
         anchor = f'<span id="page-{page}" epub:type="pagebreak" role="doc-pagebreak" aria-label="{page}"/>'
         if record.get('image_only'):
             name = f'page-{page:05d}.png'
-            assets.append((name, inside(folder, entry['image'])))
+            assets.append((name, inside(folder, entry['image']), None))
             section['nodes'].append(('raw', anchor+f'<img src="images/{name}" alt="Source page {page}"/>'))
             last = None
             continue
-        values = record.get('paragraphs', [])
-        if not values or not any(value['text'].strip() for value in values):
+        items = page_items(record)
+        if not any(kind == 'figure' or value['text'].strip() for kind, value in items):
             raise ValueError(f'Page {page} has empty OCR. Correct it or mark it as an image in Review.')
-        for index, value in enumerate(values):
+        values = [value for kind, value in items if kind == 'p']
+        continuation = record.get('continuation')
+        # A figure never splits a paragraph: when the page's first paragraph continues the previous page, figures
+        # above it follow the joined paragraph, which then carries the page anchor. Figures leave `last` alone.
+        merge_first = bool(values and last and last['page'] == page-1 and
+                           (continuation is True or (continuation is None and not values[0].get('first_indent', True) and last['full']))
+                           and not re.match(r'^[—–-]\s', values[0]['text'].strip()))
+        index = 0
+        for kind, value in items:
+            if kind == 'figure':
+                number, box = value
+                name = f'page-{page:05d}-figure-{number}.png'
+                assets.append((name, inside(folder, entry['image']), box))
+                section['nodes'].append(('raw', ('' if merge_first else anchor)+f'<div class="figure"><img src="images/{name}" alt="Illustration from page {page}"/></div>'))
+                figures += 1
+                if not merge_first: anchor = ''
+                continue
             text = value['text'].strip()
-            continuation = record.get('continuation')
-            auto_join = not value.get('first_indent', True) and last and last['full']
-            merge = (index == 0 and last and last['page'] == page-1 and
-                     (continuation is True or (continuation is None and auto_join))
-                     and not re.match(r'^[—–-]\s', text))
+            merge = index == 0 and merge_first
+            index += 1
             if merge:
                 joined = join_text(last['text'], text, config)
                 left_length = len(last['text'])
@@ -335,7 +391,7 @@ def build_epub(folder, output, config, partial=False, image_only=False):
         with ZipFile(temp, 'x', compression=ZIP_DEFLATED) as archive:
             archive.writestr('mimetype', 'application/epub+zip', compress_type=ZIP_STORED)
             archive.writestr('META-INF/container.xml', '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
-            archive.writestr('EPUB/style.css', 'body{font-family:serif;line-height:1.4;margin:0 4%}p{margin:0;text-indent:1.2em}h1{text-align:center;margin:1.5em 0}img{display:block;max-width:100%;height:auto;margin:auto}[epub\\:type="pagebreak"]{font-size:0;line-height:0}')
+            archive.writestr('EPUB/style.css', 'body{font-family:serif;line-height:1.4;margin:0 4%}p{margin:0;text-indent:1.2em}h1{text-align:center;margin:1.5em 0}img{display:block;max-width:100%;height:auto;margin:auto}.figure{margin:1em 0}[epub\\:type="pagebreak"]{font-size:0;line-height:0}')
             items = ['<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>', '<item id="css" href="style.css" media-type="text/css"/>']
             spine, toc = [], []
             def xhtml(name, body):
@@ -347,11 +403,11 @@ def build_epub(folder, output, config, partial=False, image_only=False):
                 items.append(f'<item id="s{index}" href="{name}" media-type="application/xhtml+xml"/>')
                 spine.append(f'<itemref idref="s{index}"/>')
                 toc.append(f'<li><a href="{name}">{escape(section["title"])}</a></li>')
-            for index, (name, path) in enumerate(assets):
-                # Re-encode to PNG because imported manifests may point to JPEG.
+            for index, (name, path, box) in enumerate(assets):
+                # Re-encode to PNG because imported manifests may point to JPEG; a figure is cropped from its page.
                 with Image.open(path) as image:
                     buffer = io.BytesIO()
-                    image.convert('RGB').save(buffer, format='PNG')
+                    (image.crop(box) if box else image).convert('RGB').save(buffer, format='PNG')
                 archive.writestr('EPUB/images/'+name, buffer.getvalue())
                 items.append(f'<item id="i{index}" href="images/{name}" media-type="image/png"/>')
             page_nav = ''.join(f'<li><a href="section-{section:03d}.xhtml#page-{page}">{page}</a></li>' for page, section in links)
@@ -374,7 +430,7 @@ def build_epub(folder, output, config, partial=False, image_only=False):
     finally:
         temp.unlink(missing_ok=True)
     report = {'pages': len(manifest['pages']), 'total': manifest['total'], 'partial': partial,
-              'sections': len(sections), 'image_pages': len(assets), 'reviewed_pages': reviewed,
+              'sections': len(sections), 'image_pages': len(assets)-figures, 'figures': figures,'reviewed_pages': reviewed,
               'paragraphs': sum(kind=='p' for section in sections for kind, _ in section['nodes']),
               'cross_page_joins': joins, 'sha256': digest(output), 'output': str(output)}
     write_json(output.with_suffix('.verification.json'), report)

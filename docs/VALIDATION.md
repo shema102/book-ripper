@@ -22,7 +22,9 @@ parsing (label misreads, glued numbers, ambiguity), preview rotation point mappi
 paragraph inference, natural-order import,
 OCR cache invalidation, metadata changes without re-OCR, source-bound review edits,
 exclusive capture locks, explicit page continuation, distinct hard breaks/paragraphs,
-EPUB structure, all source-page anchors, image preservation and incomplete export.
+EPUB structure, all source-page anchors, image preservation and incomplete export,
+figure boxes (light/dark theme, drop caps excluded, OCR noise removed), figure
+markers in review and figure crops placed around joined paragraphs.
 
 ## Real Tesseract integration
 
@@ -49,7 +51,7 @@ python tests/ui_smoke.py capture
 ```
 
 These open the actual Tkinter window for 30 seconds with generated sample data,
-test review save and a background-job completion, and record widget dimensions in
+test review save, figure add/delete with marker renumbering, and a background-job completion, and record widget dimensions in
 `.test-work/ui-state.json`. The Capture and Book generation tabs were visually
 inspected at 1220×900. Neither test opens a webcam or calls ADB.
 

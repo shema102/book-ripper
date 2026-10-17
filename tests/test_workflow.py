@@ -11,13 +11,14 @@ import unittest
 from unittest.mock import patch
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile, ZIP_STORED
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from opticalbook.android import Phone, focused, parse_counter
 from opticalbook.capture import capture, validate_manifest
 from opticalbook.common import defaults, digest, read_json, write_json
 from opticalbook.indicator import parse_indicator, prepare, read_indicator, whitelist
-from opticalbook.generation import build_epub, import_images, ocr_test, page_record, recognize, save_review
+from opticalbook.figures import detect
+from opticalbook.generation import build_epub, group_lines, import_images, ocr_test, page_layout, page_record, recognize, review_text, save_review
 from opticalbook.__main__ import main
 from opticalbook.imaging import REGIONS, Camera, controls, exposure_raw, exposure_seconds, from_screen, gesture_from, parse_shutter, peaking, rectify, rotate_point, shutter_text, to_screen
 from opticalbook.layout import paragraph_starts
@@ -515,14 +516,14 @@ class WorkflowTests(unittest.TestCase):
         first=tsv('Він','купив','iPhone','He','-','Apeca','сказав','нам')
         with patch('opticalbook.generation.tesseract',return_value=('tesseract','')),\
              patch('opticalbook.generation.run',side_effect=[first,tsv('Він','купив','іРһопе','не','-','Ареса','сказав','нам')]) as runner:
-            _,lines=ocr_test(page_image(1),dict(self.book,ocr_language='ukr+eng',scale=1))
+            _,lines,_=ocr_test(page_image(1),dict(self.book,ocr_language='ukr+eng',scale=1))
         self.assertEqual(lines[0]['text'],'Він купив iPhone не — Ареса сказав нам')  # iPhone has letters without Cyrillic twins
         self.assertEqual([word.get('ocr_text') for word in lines[0]['words'] if 'ocr_text' in word],['He','Apeca'])
         self.assertEqual(runner.call_args_list[1][0][0][3:5],['-l','ukr'])
         # A mostly Latin page is not re-read: there 'He' is English.
         with patch('opticalbook.generation.tesseract',return_value=('tesseract','')),\
              patch('opticalbook.generation.run',return_value=tsv('He','said','that','nothing','was','wrong')) as runner:
-            _,lines=ocr_test(page_image(1),dict(self.book,ocr_language='ukr+eng',scale=1))
+            _,lines,_=ocr_test(page_image(1),dict(self.book,ocr_language='ukr+eng',scale=1))
         self.assertEqual((runner.call_count,lines[0]['text']),(1,'He said that nothing was wrong'))
 
     def test_ocr_test_uses_book_pipeline_and_writes_nothing(self):
@@ -531,7 +532,7 @@ class WorkflowTests(unittest.TestCase):
             enumerate([(60,95,'First line of a paragraph that is'),(15,40,'continued on the next line.'),(60,95,'Next one.')],1))
         before=sorted(self.folder.rglob('*'))
         with patch('opticalbook.generation.tesseract',return_value=('tesseract','')),patch('opticalbook.generation.run',return_value=raw.encode()) as runner:
-            values,lines=ocr_test(page_image(1),dict(self.book,scale=1))
+            values,lines,figures=ocr_test(page_image(1),dict(self.book,scale=1))
         self.assertEqual([value['text'] for value in values],['First line of a paragraph that is continued on the next line.','Next one.'])
         self.assertEqual(lines[1]['words'][0]['confidence'],40)
         self.assertEqual(runner.call_args[0][0][:3],['tesseract','stdin','stdout'])
@@ -569,6 +570,83 @@ class WorkflowTests(unittest.TestCase):
             ns={'x':'http://www.w3.org/1999/xhtml'}
             self.assertEqual(len(root.findall('.//x:p',ns)),4)
             self.assertEqual(len(root.findall('.//x:br',ns)),2)
+
+    def figure_page(self,drop_cap=False):
+        """600×900 page: text bars with their OCR words, a drawing with OCR noise read out of it, and either more
+        text below or a drop cap beside three lines."""
+        image=Image.new('RGB',(600,900),'white');draw=ImageDraw.Draw(image);words=[]
+        def text(n,left,top,right,conf=95,value='word'):
+            draw.rectangle((left,top,right,top+23),fill='black')
+            words.append({'key':(1,1,n),'text':value,'confidence':conf,'left':left,'top':top,'width':right-left,'height':24})
+        for n in range(4): text(n,40 if n else 80,40+32*n,560 if n<3 else 300)
+        draw.rectangle((150,230,450,520),outline='black',width=3);draw.line((150,230,450,520),fill='black',width=3)
+        draw.ellipse((260,300,340,380),fill='#555555')
+        words.append({'key':(2,1,1),'text':'~|','confidence':20,'left':200,'top':420,'width':60,'height':25})  # noise in the drawing
+        if drop_cap:
+            draw.rectangle((40,600,110,700),fill='black')
+            for n in range(3): text(10+n,130,600+32*n,560)
+        else:
+            for n in range(3): text(10+n,80 if n==0 else 40,600+32*n,560)
+        return image,group_lines(words)
+
+    def test_figure_is_boxed_and_its_ocr_noise_leaves_the_text(self):
+        image,lines=self.figure_page()
+        boxes,kept=detect(image,lines)
+        self.assertEqual(len(boxes),1)
+        left,top,right,bottom=boxes[0]
+        self.assertTrue(left<=150 and top<=230 and right>=451 and bottom>=521,boxes)
+        self.assertTrue(left>=135 and top>=215 and right<=466 and bottom<=536,boxes)  # a small margin, no text bars
+        self.assertNotIn('~|',[line['text'] for line in kept])
+        values,_,figures=page_layout(image,lines,self.book)
+        self.assertEqual(len(values),2)
+        self.assertEqual(figures[0]['at'],1)
+        self.assertEqual(review_text({'paragraphs':values,'figures':figures}),'word word word word\n\n[figure 1]\n\nword word word')
+        # Switched off, nothing is boxed and every line stays.
+        values,kept,figures=page_layout(image,lines,dict(self.book,figures=False))
+        self.assertEqual((figures,len(kept)),([],len(lines)))
+
+    def test_drop_cap_beside_text_is_not_a_figure(self):
+        image,lines=self.figure_page(drop_cap=True)
+        boxes,_=detect(image,lines)
+        self.assertEqual(len(boxes),1)
+        self.assertLess(boxes[0][3],560)  # only the drawing
+
+    def test_dark_theme_figure_is_found(self):
+        image,lines=self.figure_page()
+        boxes,_=detect(ImageOps.invert(image),lines)
+        self.assertEqual(len(boxes),1)
+
+    def test_review_markers_place_figures_and_must_match_boxes(self):
+        self.scan()
+        entries=validate_manifest(self.folder)['pages']
+        box=[20,30,120,100]
+        with self.assertRaisesRegex(ValueError,'No marker for figure 1'):save_review(self.folder,entries[0],'Text.',figures=[box])
+        with self.assertRaisesRegex(ValueError,'each once'):save_review(self.folder,entries[0],'[figure 2]',figures=[box])
+        with self.assertRaisesRegex(ValueError,'own'):save_review(self.folder,entries[0],'See [figure 1] here.',figures=[box])
+        with self.assertRaisesRegex(ValueError,'outside'):save_review(self.folder,entries[0],'[figure 1]',figures=[[0,0,500,50]])
+        record=save_review(self.folder,entries[0],'Before.\n\n[figure 1]\n\nAfter.',figures=[box])
+        self.assertEqual(record['figures'],[{'box':box,'at':1}])
+        self.assertEqual(review_text(page_record(self.folder,entries[0])),'Before.\n\n[figure 1]\n\nAfter.')
+        save_review(self.folder,entries[1],'[figure 1]',figures=[box])  # a page with only a figure needs no text
+
+    def test_epub_crops_figures_between_paragraphs_and_never_splits_a_joined_paragraph(self):
+        self.scan()
+        entries=validate_manifest(self.folder)['pages']
+        save_review(self.folder,entries[0],'A paragraph which\n\n[figure 1]',figures=[[20,30,120,100]])
+        save_review(self.folder,entries[1],'[figure 1]\n\ncontinues on the next page.',continuation=True,figures=[[10,10,60,50]])
+        output=self.folder/'figures.epub'
+        report=build_epub(self.folder,output,self.book)
+        self.assertEqual((report['figures'],report['image_pages'],report['cross_page_joins']),(2,0,[2]))
+        with ZipFile(output) as archive:
+            with Image.open(io.BytesIO(archive.read('EPUB/images/page-00001-figure-1.png'))) as crop:
+                self.assertEqual(crop.size,(100,70))
+            self.assertIn(b'images/page-00002-figure-1.png',archive.read('EPUB/package.opf'))
+            root=ET.fromstring(archive.read('EPUB/section-000.xhtml'))
+            body=root.find('{http://www.w3.org/1999/xhtml}body')
+            order=[(node.tag.split('}')[1],''.join(node.itertext())) for node in body]
+            self.assertEqual(order,[('p','A paragraph which continues on the next page.'),('div',''),('div','')])
+            paragraph=body[0]
+            self.assertEqual([node.attrib['id'] for node in paragraph if 'id' in node.attrib],['page-1','page-2'])
 
 
 if __name__=='__main__':unittest.main()

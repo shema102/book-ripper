@@ -215,6 +215,18 @@ OCR block change there), but with page-layout PSM 3 Tesseract usually drops the
 initial letter itself, so chapter openings need review. Diagrams, footnotes and
 unusual layouts need review too. Choose image preservation when appropriate.
 
+`opticalbook/figures.py` finds illustrations after OCR, with NumPy/Pillow only. Ink is
+anything differing from the median paper tone (so dark themes work); confidently
+recognized letter-sized words (or high-confidence large headings) are erased, and what
+remains, closed by about half a line height on a coarse grid, is a figure when it is
+at least two text lines tall and wide. Ink with text beside it is a drop cap or
+marginal ornament, not a figure: e-books place figures between paragraphs. OCR lines
+mostly inside a figure (labels, noise read from a drawing) leave the text. Each figure
+is placed before the first paragraph starting below its top. Export crops the source
+image; a figure never splits a paragraph, so when the first paragraph of a page joins
+the previous page, figures above it follow the joined paragraph. Detection is a
+heuristic: Review shows the boxes and can delete or draw them.
+
 ## Project files and contract
 
 ```text
@@ -228,7 +240,7 @@ calibration/screen.png       last inspected phone screen crop (when calibrated)
 calibration/indicator.png    last inspected page indicator crop (when calibrated)
 ocr/raw/00001.tsv            unmodified Tesseract word-position output
 ocr/pages/00001.json         source-bound OCR cache and inferred paragraphs
-ocr/edits/00001.json         source-bound explicit review, chapter and image-page choices
+ocr/edits/00001.json         source-bound explicit review, chapter, figure and image-page choices
 .capture.lock               present only while capture writes (PID recorded)
 .generation.lock            present only during OCR/export (PID recorded)
 STOP                        optional user-created stop sentinel for capture
@@ -296,13 +308,14 @@ have not been exercised. Kindle import/rendering is also untested. See
 | `indicator.py` | Tesseract reading of the calibrated page indicator (optical counter) |
 | `capture.py` | sequence verification, resume, image/manifest writing |
 | `layout.py` | geometric paragraph-boundary inference |
+| `figures.py` | illustration bounding boxes from ink unexplained by OCR words |
 | `generation.py` | image import, Tesseract TSV, separate review, EPUB |
 | `ui.py` | two-tab Tkinter UI and background-job/event-queue coordination |
 | `__main__.py` | independent CLI commands and GUI launch |
 
 Useful next improvements: test actual cameras on all three operating systems;
 add device discovery and per-device camera-control ranges; expose OCR confidence
-overlays; allow cropped illustration regions; improve multicolumn/footnote layout;
+overlays; resize figure boxes in place; improve multicolumn/footnote layout;
 add an optional generic fast Android counter adapter. The legacy Java monitor
 demonstrates that last approach but is currently reader-specific and not invoked.
 
