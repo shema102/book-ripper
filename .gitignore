@@ -1,0 +1,27 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Local book projects and test output (photos, OCR, EPUBs)
+projects/
+.test-work/
+
+# Bundled Tesseract runtime (~75 MB of binaries and models); rebuild with:
+#   python -m opticalbook bundle-tesseract <Tesseract install folder>
+opticalbook/bundled/
+
+# Leftovers from interrupted atomic writes / bundling
+*.tmp
+*.partial/
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

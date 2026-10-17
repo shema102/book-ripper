@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "capture": {
+    "camera": {
+      "source": "0",
+      "backend": "auto",
+      "width": 1920,
+      "height": 1080,
+      "fps": 30,
+      "fourcc": "MJPG",
+      "autofocus": true,
+      "focus": null,
+      "exposure": null,
+      "auto_exposure": null,
+      "brightness": null,
+      "auto_white_balance": null,
+      "white_balance": null
+    },
+    "corners": [],
+    "settle_seconds": 1.0,
+    "minimum_sharpness": 0.0,
+    "minimum_difference": 0.6,
+    "counter_mode": "verified",
+    "total": 1,
+    "adb": "adb",
+    "serial": "",
+    "package": "",
+    "counter_regex": "(?i)\\s*(?:(?:Page|Сторінка)\\s+)?(\\d+)\\s*/\\s*(\\d+)\\s*",
+    "gesture": {
+      "kind": "swipe",
+      "start": [
+        0.8,
+        0.55
+      ],
+      "end": [
+        0.2,
+        0.55
+      ],
+      "duration_ms": 300
+    }
+  },
+  "book": {
+    "title": "Example book",
+    "author": "Author",
+    "language": "uk",
+    "tesseract": "tesseract",
+    "tessdata": "",
+    "ocr_language": "ukr+eng",
+    "psm": 3,
+    "scale": 1.5,
+    "dictionary_hyphens": false
+  }
+}
